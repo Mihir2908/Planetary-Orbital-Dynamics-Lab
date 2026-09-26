@@ -3514,9 +3514,6 @@ def ml_predict(req: MlPredictRequest):
             mm_resolution   = req.mm_resolution,
             am_resolution   = req.am_resolution,
         )
-        # Always sync to session so ml_plot(heatmap) works even when called from UI button
-        if result.get("ok"):
-            session.last_ml_prediction = result
         return result
     except Exception as e:
         print(f"[ML] Predict error: {e}", flush=True)
