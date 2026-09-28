@@ -2,8 +2,9 @@
 import React, { useRef, useState, useCallback, useEffect, memo } from 'react';
 import {
   BarChart2, X, GripHorizontal, Sun, Globe, Moon,
-  CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain,
+  CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain, HelpCircle, Info,
 } from 'lucide-react';
+import { TutorialOverlay } from '@/components/tutorial/TutorialOverlay';
 import { AppShell } from '@/components/layout/AppShell';
 import { OrbitCanvas } from '@/components/animation/OrbitCanvas';
 import { OrbitOverlay } from '@/components/animation/OrbitOverlay';
@@ -299,6 +300,10 @@ export default function HomePage() {
   const [showMl,         setShowMl]         = useState(false);
   const [showFullscreen, setShowFullscreen] = useState(false);
   const [stripCollapsed, setStripCollapsed] = useState(false);
+  // Tutorial opens on every page load
+  const [tutorialOpen,   setTutorialOpen]   = useState(true);
+  // Info modal state for canvas overlay
+  const [showCanvasInfo, setShowCanvasInfo] = useState(false);
 
   // Status message with smooth fade-out
   const [statusMsg,  setStatusMsg]  = useState<string | null>(null);
@@ -462,6 +467,7 @@ export default function HomePage() {
 
   const mainContent = (
     <div
+      id="tutorial-canvas-area"
       ref={containerRef}
       className={cn(
         'relative w-full h-full overflow-hidden',
@@ -490,7 +496,7 @@ export default function HomePage() {
           </div>
 
           {/* ── Top-center collapsible control strip ─────────────────────────── */}
-          <div className={cn(
+          <div id="tutorial-nasa-search" className={cn(
             'absolute top-3 left-1/2 -translate-x-1/2 z-20 w-72',
             'bg-black/50 border border-gray-700/40 backdrop-blur-sm rounded-lg px-3',
             stripCollapsed ? 'py-1.5' : 'py-2',
@@ -529,6 +535,7 @@ export default function HomePage() {
                   />
                   <span className="text-xs text-gray-600 shrink-0">(0=1 orbit)</span>
                   <button
+                    id="tutorial-run-btn"
                     onClick={handleRun}
                     disabled={isRunning}
                     className={cn(
@@ -561,13 +568,39 @@ export default function HomePage() {
           {/* ── Top-right: legend + FABs ──────────────────────────────────────── */}
           <div className="absolute top-3 right-3 z-10 flex flex-col items-end gap-1.5">
             {trajectoryFrames && (
-              <div className="pointer-events-none bg-black/45 rounded px-2.5 py-2 space-y-1.5 border border-gray-700/40">
+              <div id="tutorial-legend" className="bg-black/45 rounded px-2.5 py-2 space-y-1.5 border border-gray-700/40 relative">
                 <LegendRow color="#FFDD00" label="Star" />
                 <LegendRow color="#4488FF" label="Planet" />
                 <LegendRow color="#FF5555" label="Moon" />
+                {/* Canvas info button */}
+                <button
+                  onClick={() => setShowCanvasInfo(v => !v)}
+                  className="absolute -top-1.5 -left-6 w-5 h-5 flex items-center justify-center rounded-full text-gray-500 hover:text-blue-400 hover:bg-blue-900/20 transition-colors text-[11px] border border-gray-700/50 bg-gray-900/70"
+                  title="About this view"
+                >
+                  <Info size={10} />
+                </button>
               </div>
             )}
-            <button onClick={() => setShowStar(v => !v)}
+            {/* Canvas info modal */}
+            {showCanvasInfo && (
+              <>
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onClick={() => setShowCanvasInfo(false)} />
+                <div className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-white">3D Orbit View</span>
+                    <button onClick={() => setShowCanvasInfo(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
+                  </div>
+                  <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
+                    <p><span className="text-yellow-400 font-medium">Yellow</span> = Star · <span className="text-blue-400 font-medium">Blue</span> = Planet · <span className="text-red-400 font-medium">Red</span> = Moon</p>
+                    <p>The <span className="text-emerald-400 font-medium">green shell</span> marks the star&apos;s habitable zone (HZ) — the range of orbital distances where liquid water could exist on a moon&apos;s surface.</p>
+                    <p>After running an ML prediction, a <span className="text-violet-400 font-medium">violet shell</span> shows the predicted stable+habitable orbit range for the selected moon mass.</p>
+                    <p>Drag to rotate · Scroll to zoom · Use ⊙ in the playback bar to reset the camera.</p>
+                  </div>
+                </div>
+              </>
+            )}
+            <button id="tutorial-star-fab" onClick={() => setShowStar(v => !v)}
               className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
                 showStar ? 'bg-yellow-600/30 text-yellow-300 border-yellow-600/50'
                          : 'bg-black/50 text-gray-400 hover:text-yellow-300 hover:bg-gray-800/70 border-gray-700/60')}
@@ -576,7 +609,7 @@ export default function HomePage() {
               <span>Star</span>
               <StatusIcon status={starStatus} isRunning={isRunning} />
             </button>
-            <button onClick={() => setShowPlanet(v => !v)}
+            <button id="tutorial-planet-fab" onClick={() => setShowPlanet(v => !v)}
               className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
                 showPlanet ? 'bg-blue-600/30 text-blue-300 border-blue-600/50'
                            : 'bg-black/50 text-gray-400 hover:text-blue-300 hover:bg-gray-800/70 border-gray-700/60')}
@@ -585,7 +618,7 @@ export default function HomePage() {
               <span>Planet</span>
               <StatusIcon status={planetStatus} isRunning={isRunning} />
             </button>
-            <button onClick={() => setShowMoon(v => !v)}
+            <button id="tutorial-moon-fab" onClick={() => setShowMoon(v => !v)}
               className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
                 showMoon ? 'bg-red-600/30 text-red-300 border-red-600/50'
                          : 'bg-black/50 text-gray-400 hover:text-red-300 hover:bg-gray-800/70 border-gray-700/60')}
@@ -594,7 +627,7 @@ export default function HomePage() {
               <span>Moon</span>
               <StatusIcon status={moonStatus} isRunning={isRunning} />
             </button>
-            <button onClick={() => setShowEda(v => !v)}
+            <button id="tutorial-eda-fab" onClick={() => setShowEda(v => !v)}
               className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
                 showEda ? 'bg-blue-600/80 text-white border-blue-500/60'
                         : 'bg-black/50 text-gray-400 hover:text-white hover:bg-gray-800/70 border-gray-700/60')}
@@ -602,7 +635,7 @@ export default function HomePage() {
               <BarChart2 size={12} />
               EDA
             </button>
-            <button onClick={() => setShowMl(v => !v)}
+            <button id="tutorial-ml-fab" onClick={() => setShowMl(v => !v)}
               className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
                 showMl ? 'bg-violet-600/80 text-white border-violet-500/60'
                        : 'bg-black/50 text-gray-400 hover:text-violet-300 hover:bg-gray-800/70 border-gray-700/60')}
@@ -664,6 +697,7 @@ export default function HomePage() {
 
       {/* ── Always-visible: MiniOrbitView + playback ────────────────────────── */}
       <MiniOrbitView
+        id="tutorial-mini-orbit"
         frames={activeFrames}
         frameIndex={sceneControls.frameIndex}
         showHillSphereRings={!!previewCellFrames}
@@ -672,6 +706,7 @@ export default function HomePage() {
 
       {sceneControls.totalFrames > 0 && (
         <div
+          id="tutorial-playback"
           ref={playbackPanelRef}
           className={cn(
             'absolute z-20',
@@ -718,10 +753,26 @@ export default function HomePage() {
   );
 
   return (
-    <AppShell
-      main={mainContent}
-      chat={<ChatPanel />}
-    />
+    <>
+      <AppShell
+        main={mainContent}
+        chat={<ChatPanel />}
+      />
+
+      {/* Tutorial FAB — ? button above chatbot FAB */}
+      <button
+        onClick={() => setTutorialOpen(true)}
+        className="fixed bottom-[76px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
+                   flex items-center justify-center transition-colors
+                   bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
+        title="Open tutorial"
+      >
+        <HelpCircle size={20} className="text-gray-300" />
+      </button>
+
+      {/* Tutorial overlay — auto-opens on every load */}
+      {tutorialOpen && <TutorialOverlay onClose={() => setTutorialOpen(false)} />}
+    </>
   );
 }
 

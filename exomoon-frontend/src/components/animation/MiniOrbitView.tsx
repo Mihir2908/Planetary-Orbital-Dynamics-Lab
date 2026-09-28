@@ -8,6 +8,7 @@ interface MiniOrbitViewProps {
   frameIndex: number;
   /** Override the default absolute-positioned wrapper class for inline use. */
   className?: string;
+  id?: string;
   /** When true: draw Hill sphere (white dashed outer) + Roche limit (red dashed inner). */
   showHillSphereRings?: boolean;
   /** Roche limit as fraction of rhill (e.g. am_grid[0]). Used when showHillSphereRings=true. */
@@ -21,7 +22,7 @@ const CSS_W = 200;
 const CSS_H = 170;
 
 export function MiniOrbitView({
-  frames, frameIndex, className, showHillSphereRings, rocheInnerFrac,
+  frames, frameIndex, className, id, showHillSphereRings, rocheInnerFrac,
 }: MiniOrbitViewProps) {
   const { params, simMeta, mlPrediction, mlMassIdx, previewRhillAU } = useSimulationStore();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -233,7 +234,7 @@ export function MiniOrbitView({
   const amRange  = (mlPrediction && rhill) ? mlPrediction.validAmPerMm[mlMassIdx] : null;
 
   return (
-    <div className={className ?? 'absolute bottom-16 right-3 z-10 pointer-events-none'}
+    <div id={id} className={className ?? 'absolute bottom-16 right-3 z-10 pointer-events-none'}
          style={{ width: CSS_W }}>
       {/* Legend */}
       {(amRange || (showHillSphereRings && rhill)) && (

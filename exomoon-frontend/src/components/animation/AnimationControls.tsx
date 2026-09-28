@@ -1,6 +1,6 @@
 'use client';
 import React from 'react';
-import { Play, Pause, SkipBack, SkipForward } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Crosshair } from 'lucide-react';
 import type { SceneControls } from './useOrbitScene';
 import { cn } from '@/lib/utils';
 
@@ -18,6 +18,7 @@ export function AnimationControls({
   setFrameIndex,
   setIsPlaying,
   setSpeedMultiplier,
+  resetCamera,
   className,
 }: AnimationControlsProps) {
   if (totalFrames === 0) return null;
@@ -94,6 +95,11 @@ export function AnimationControls({
             ))}
           </div>
         </div>
+
+        {/* Zoom to fit */}
+        <IconBtn onClick={resetCamera} title="Zoom to fit — reset camera to frame all three bodies">
+          <Crosshair size={13} />
+        </IconBtn>
       </div>
     </div>
   );

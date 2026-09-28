@@ -31,6 +31,7 @@ export function AppShell({ main, chat }: AppShellProps) {
 
       {/* Chat toggle FAB */}
       <button
+        id="tutorial-chat-fab"
         onClick={() => setChatOpen(o => !o)}
         className={cn(
           'fixed bottom-5 right-4 z-50 w-12 h-12 rounded-full shadow-lg',

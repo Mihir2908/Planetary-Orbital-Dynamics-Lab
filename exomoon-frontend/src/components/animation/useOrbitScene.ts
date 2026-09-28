@@ -35,6 +35,7 @@ export interface SceneControls {
   setFrameIndex: (i: number) => void;
   setIsPlaying: (v: boolean) => void;
   setSpeedMultiplier: (v: number) => void;
+  resetCamera: () => void;
 }
 
 export interface BodyRadiiAU {
@@ -502,5 +503,6 @@ export function useOrbitScene(
     setFrameIndex,
     setIsPlaying,
     setSpeedMultiplier,
+    resetCamera: () => { controlsRef.current?.reset(); },
   };
 }

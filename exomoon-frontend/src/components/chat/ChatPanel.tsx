@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
 import { useChatStream } from '@/hooks/useChatStream';
 import { ChatMessage } from './ChatMessage';
@@ -10,6 +10,7 @@ export function ChatPanel() {
   const { sendMessage } = useChatStream();
   const bottomRef = useRef<HTMLDivElement>(null);
   const isStreaming = chatMessages.some(m => m.streaming);
+  const [agentInfoOpen, setAgentInfoOpen] = useState(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -20,6 +21,13 @@ export function ChatPanel() {
       {/* Header */}
       <div className="flex items-center px-4 py-3 border-b border-gray-800 shrink-0">
         <h2 className="text-xs font-semibold text-gray-400 tracking-widest uppercase">Agent Chat</h2>
+        <button
+          onClick={() => setAgentInfoOpen(true)}
+          title="About the AI agent"
+          className="ml-2 w-5 h-5 flex items-center justify-center rounded-full text-gray-600 hover:text-blue-400 hover:bg-blue-900/20 transition-colors text-[11px] border border-gray-700/50 shrink-0"
+        >
+          ℹ
+        </button>
         <button
           onClick={clearSession}
           disabled={isStreaming}
@@ -32,6 +40,29 @@ export function ChatPanel() {
         </button>
         <div className={`w-2 h-2 rounded-full ${isStreaming ? 'bg-blue-400 animate-pulse' : 'bg-gray-700'}`} />
       </div>
+
+      {/* Agent info modal */}
+      {agentInfoOpen && (
+        <>
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onClick={() => setAgentInfoOpen(false)} />
+          <div className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-white">AI Agent Capabilities</span>
+              <button onClick={() => setAgentInfoOpen(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
+            </div>
+            <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
+              <p>The agent is powered by Claude (Anthropic) with extended reasoning. It can:</p>
+              <ul className="space-y-1 pl-3 list-disc">
+                <li><span className="text-blue-300">Run simulations</span> — describe a system in natural language and it will configure and launch a three-body simulation on your behalf.</li>
+                <li><span className="text-blue-300">Fetch exoplanet data</span> — look up any confirmed exoplanet from the NASA Exoplanet Archive and auto-fill parameters.</li>
+                <li><span className="text-blue-300">Analyse stability</span> — query moon escape time, maximum separation, habitability metrics from cached simulation results without re-running.</li>
+                <li><span className="text-blue-300">Trigger ML previews</span> — run the full 50×50 ML stability grid or query individual grid cells.</li>
+              </ul>
+              <p className="text-gray-500 text-[10px]">Responses stream token-by-token. Complex queries with extended thinking may take 30–90 seconds.</p>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
