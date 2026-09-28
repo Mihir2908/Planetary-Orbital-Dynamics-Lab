@@ -20,9 +20,14 @@ export function useChatStream() {
   } = useSimulationStore();
 
   const abortRef = useRef<AbortController | null>(null);
+  // Prevent double-submit: React concurrent-mode batches setValue('') so a rapid second
+  // keypress can read the old textarea value before the re-render clears it.
+  const inFlightRef = useRef(false);
 
   const sendMessage = useCallback(async (userText: string) => {
     if (!userText.trim()) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
 
     // Add user message immediately
     addChatMessage({ role: 'user', content: userText, id: crypto.randomUUID() });
@@ -187,8 +192,10 @@ export function useChatStream() {
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') return;
       finalizeChatMessage(assistantId, 'Connection error. Is the agent service running?');
+    } finally {
+      inFlightRef.current = false;
     }
-  }, [params, simYears, simdataB64, dmCgs, mlPrediction, trajPreview, addChatMessage, appendToLastAssistant, finalizeChatMessage, setSimdataB64, setMlPrediction, setTrajPreview, updateJobStatus, setJob, setParams, setPreviewCellFrames, setChatCellFrames]);
+  }, [params, simYears, simdataB64, dmCgs, mlPrediction, trajPreview, sessionId, addChatMessage, appendToLastAssistant, finalizeChatMessage, setSimdataB64, setMlPrediction, setTrajPreview, updateJobStatus, setJob, setParams, setPreviewCellFrames, setChatCellFrames]);
 
   const abort = useCallback(() => abortRef.current?.abort(), []);
 

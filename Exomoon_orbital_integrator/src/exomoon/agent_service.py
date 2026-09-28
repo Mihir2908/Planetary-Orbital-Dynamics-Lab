@@ -192,6 +192,11 @@ _traj_ram_cache: Dict[str, dict] = {}
 _traj_ram_lock  = threading.Lock()
 _MAX_TRAJ_RAM   = 3   # keep at most 3 batch results in RAM (~90 MB each)
 
+# ── HNN async job tracker — HNN batches take ~470s (NLB TCP timeout is 350s) ────────────────
+# Jobs run in background threads; frontend polls GET /trajectory/job/{job_id}/status.
+_hnn_jobs: Dict[str, dict] = {}
+_hnn_jobs_lock = threading.Lock()
+
 # Developer/user mode flag — toggled by keyword in chat messages (never exposed to user)
 _developer_mode: bool = False
 
@@ -1967,23 +1972,96 @@ def _chat_rule_based(req: ChatRequest, session: Optional[SessionCache] = None, s
     }
 
 
+def _detect_retry_and_recover(message: str, session: "SessionCache") -> Optional[Dict[str, Any]]:
+    """
+    Detect a connection-drop retry: if the incoming message is identical to the last user
+    turn already in conversation_history, the client lost the SSE connection after the server
+    finished and is re-sending.  Re-serve the previous assistant text plus all cached data
+    (traj_preview, ml_prediction, simdata, cell_frames) without calling Claude.
+    Returns None when not a retry.
+    """
+    hist = session.conversation_history
+    if len(hist) < 2:
+        return None
+
+    # Expect the history tail to be: ..., user-turn, assistant-turn
+    last_asst = hist[-1]
+    last_user = hist[-2]
+    if last_asst.get("role") != "assistant":
+        return None
+    if last_user.get("role") != "user":
+        return None
+
+    # Extract stored user message (format: "User request: <msg>\n\nContext: ...")
+    raw = last_user.get("content", "")
+    if isinstance(raw, str):
+        prefix = "User request: "
+        stored_msg = raw[len(prefix):].split("\n\nContext:")[0].strip() if raw.startswith(prefix) else raw.strip()
+    else:
+        return None
+
+    if stored_msg.lower() != message.strip().lower():
+        return None  # different message — genuine new turn
+
+    # Extract assistant reply text from the stored content list
+    asst_content = last_asst.get("content", "")
+    if isinstance(asst_content, list):
+        reply_text = " ".join(
+            b.get("text", "") for b in asst_content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ).strip()
+    elif isinstance(asst_content, str):
+        reply_text = asst_content.strip()
+    else:
+        reply_text = ""
+
+    if not reply_text:
+        return None  # nothing useful to replay
+
+    print(f"[SESSION] Retry detected — replaying cached response ({len(reply_text)} chars)", flush=True)
+    return {
+        "ok":               True,
+        "mode":             "retry_replay",
+        "message":          reply_text,
+        "traj_preview":     session.last_traj_preview,
+        "ml_prediction":    session.last_ml_prediction,
+        "simdata":          session.cached_simdata,
+        "cell_frames":      session.last_cell_frames,
+        "cell_rhill_au":    session.last_cell_rhill_au,
+        "cell_roche_frac":  session.last_cell_roche_frac,
+        "cell_html_2d_url": session.last_cell_html_2d_url,
+        "cell_html_3d_url": session.last_cell_html_3d_url,
+        "cell_mm_earth":    session.last_cell_mm_earth,
+        "cell_am_hill":     session.last_cell_am_hill,
+        "effective_params": None,
+        "job_id":           None,
+        "urls":             {},
+    }
+
+
 def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
     """
     Claude tool-use orchestration (Item 3 implementation).
-    
+
     Flow:
     1. Claude receives user message + context (has_simdata, years_hint, etc.).
     2. Claude decides which tools to call (or just responds).
     3. Agent executes tools and returns results to Claude.
     4. Claude may call more tools or return final response.
     5. Falls back to rule-based if Claude unavailable or errors.
-    
+
     Policy: simdata-first for stability; if insufficient, trigger backend job autonomously.
     """
     # Per-request session — isolated per browser tab (UUID from localStorage).
     session_key = req.session_id or "default"
     session = _get_or_create_session(session_key)
     print(f"[SESSION] key={session_key!r} history_len={len(session.conversation_history)} sessions_total={len(_sessions)}", flush=True)
+
+    # Retry detection: same message as last user turn → connection was dropped after server
+    # finished; re-serve cached response instead of calling Claude ("I already ran this").
+    retry_result = _detect_retry_and_recover(req.message, session)
+    if retry_result is not None:
+        return retry_result
 
     if not CLAUDE_ENABLED or not claude:
         print("[AGENT] Claude not enabled, using rule-based fallback.", flush=True)
@@ -2889,19 +2967,37 @@ def chat_stream(req: ChatRequest):
     Streaming variant of /chat. Yields tokens as SSE (Server-Sent Events)
     for real-time chatbot UX in Dash.
 
-    Consumes /chat result and streams tokens word-by-word.
+    _chat_with_claude runs in a background thread so the HTTP response starts
+    immediately and keep-alive pings flow every 15 s during the 60-180 s Claude
+    computation — prevents mobile / NLB connection drops on silent idle periods.
     """
     print(f"[CHAT_STREAM] Entered — msg={req.message[:60]!r} simdata={bool(req.simdata)} session_id={req.session_id!r} params_keys={list((req.params or {}).keys())[:6]}", flush=True)
-    try:
-        result = _chat_with_claude(req)
-    except BaseException as _e:
-        import traceback as _tb_cs
-        print(f"[CHAT_STREAM] Unhandled exception in _chat_with_claude: {_e}", flush=True)
-        print(_tb_cs.format_exc(), flush=True)
-        result = {"ok": False, "mode": "error", "message": f"Agent error: {str(_e)}"}
-    text = result.get("message", "")
+
+    result_container: Dict[str, Any] = {}
+    result_event = threading.Event()
+
+    def _run_claude():
+        try:
+            result_container["result"] = _chat_with_claude(req)
+        except BaseException as _e:
+            import traceback as _tb_cs
+            print(f"[CHAT_STREAM] Unhandled exception in _chat_with_claude: {_e}", flush=True)
+            print(_tb_cs.format_exc(), flush=True)
+            result_container["result"] = {"ok": False, "mode": "error", "message": f"Agent error: {str(_e)}"}
+        result_event.set()
+
+    threading.Thread(target=_run_claude, daemon=True).start()
 
     def gen():
+        # Yield keep-alive pings every 15 s while Claude is computing.
+        # SSE comment lines (": ...") are ignored by the JS EventSource parser but keep
+        # the TCP connection alive through mobile carrier NAT and the NLB 350 s idle timeout.
+        while not result_event.wait(timeout=15.0):
+            yield ": ping\n\n"
+
+        result = result_container["result"]
+        text = result.get("message", "")
+
         try:
             # Metadata event — carries job_id if a backend job was started
             meta_evt = {"type": "meta", "mode": result.get("mode"), "job_id": result.get("job_id")}
@@ -3810,6 +3906,30 @@ def _decompress_gt_traj(result: Dict) -> Dict:
     return result
 
 
+def _run_hnn_background(job_id: str, req: "TrajectoryPreviewRequest", key: str) -> None:
+    """Background thread: call EC2 HNN, populate RAM + S3 caches, store result in _hnn_jobs."""
+    try:
+        print(f"[HNN_JOB] {job_id} started (key={key})", flush=True)
+        result = _forward_to_gpu("hnn_hinge4", req)
+        _store_traj_ram_cache(key, result, req.mm_resolution, req.am_resolution)
+        full_for_s3 = dict(result)
+        full_for_s3.update({"mode": "hnn_hinge4", "model_version": req.model_version,
+                            "from_cache": False, "cache_key": key})
+        threading.Thread(target=_write_cache, args=("hnn_hinge4", key, full_for_s3), daemon=True).start()
+        stripped = _strip_heavy(result)
+        stripped.update({"ok": True, "mode": "hnn_hinge4", "model_version": req.model_version,
+                         "from_cache": False, "cache_key": key})
+        with _hnn_jobs_lock:
+            _hnn_jobs[job_id]["status"] = "done"
+            _hnn_jobs[job_id]["result"] = stripped
+        print(f"[HNN_JOB] {job_id} done — stored in RAM + S3 queue", flush=True)
+    except Exception as e:
+        print(f"[HNN_JOB] {job_id} error: {type(e).__name__}: {e}", flush=True)
+        with _hnn_jobs_lock:
+            _hnn_jobs[job_id]["status"] = "error"
+            _hnn_jobs[job_id]["error"]  = f"{type(e).__name__}: {e}"
+
+
 def _forward_to_gpu(mode: str, req: TrajectoryPreviewRequest) -> Dict:
     """Forward batch request to EC2 hnn_gpu_service.py and return parsed JSON result."""
     endpoint = "/hnn/predict" if mode == "hnn_hinge4" else "/gt/predict_numba"
@@ -3849,6 +3969,36 @@ def trajectory_preview(req: TrajectoryPreviewRequest):
         raise HTTPException(status_code=500, detail=f"Trajectory preview error: {type(e).__name__}: {e}")
 
 
+@app.get("/trajectory/job/{job_id}/status")
+def trajectory_job_status(job_id: str):
+    """
+    Poll status of a background HNN trajectory job spawned by POST /trajectory/preview.
+
+    Returns:
+      computing  — job in progress, includes elapsed_s
+      done       — job complete, includes full stripped trajectory result
+      error      — job failed, includes error detail
+      404        — unknown job_id
+    """
+    with _hnn_jobs_lock:
+        jdata = _hnn_jobs.get(job_id)
+    if jdata is None:
+        raise HTTPException(status_code=404, detail=f"Unknown HNN job_id '{job_id}'")
+    status = jdata["status"]
+    if status == "computing":
+        elapsed = time.time() - jdata["started_at"]
+        return {"ok": False, "status": "computing", "job_id": job_id, "elapsed_s": int(elapsed)}
+    if status == "done":
+        result = dict(jdata["result"])
+        result["status"] = "done"
+        result["job_id"] = job_id
+        return result
+    # status == "error"
+    return _JSONResponse(status_code=500,
+                         content={"ok": False, "status": "error", "job_id": job_id,
+                                  "detail": jdata.get("error", "unknown error")})
+
+
 def _trajectory_preview_inner(req: TrajectoryPreviewRequest):
     mode = req.mode
     if mode not in ("hnn_hinge4", "gt_leapfrog"):
@@ -3873,7 +4023,26 @@ def _trajectory_preview_inner(req: TrajectoryPreviewRequest):
             r["cache_key"] = key
             return r
 
-    # ── GPU inference ──────────────────────────────────────────────────────────
+    # ── HNN cache miss: async job (HNN ~470s > NLB 350s idle timeout) ──────────
+    # GT leapfrog (~2.3s) stays synchronous — no timeout risk.
+    if mode == "hnn_hinge4":
+        with _hnn_jobs_lock:
+            # Dedup: if an identical job (same cache key) is already computing, return it.
+            for existing_id, jdata in _hnn_jobs.items():
+                if jdata.get("key") == key and jdata.get("status") == "computing":
+                    elapsed = time.time() - jdata["started_at"]
+                    print(f"[TRAJECTORY] Dedup — reusing in-flight job {existing_id} (key={key})", flush=True)
+                    return {"ok": False, "status": "computing", "job_id": existing_id,
+                            "elapsed_s": int(elapsed)}
+            # No existing job — spawn a new one.
+            job_id = uuid.uuid4().hex[:12]
+            _hnn_jobs[job_id] = {"key": key, "status": "computing",
+                                  "started_at": time.time(), "result": None, "error": None}
+        print(f"[TRAJECTORY] Spawning HNN background job {job_id} (key={key})", flush=True)
+        threading.Thread(target=_run_hnn_background, args=(job_id, req, key), daemon=True).start()
+        return {"ok": False, "status": "computing", "job_id": job_id, "elapsed_s": 0}
+
+    # ── GT leapfrog: synchronous (fast, ~2.3s) ─────────────────────────────────
     print(f"[TRAJECTORY] Forwarding to GPU service at {GPU_SERVICE_URL} (mode={mode})", flush=True)
     try:
         result = _forward_to_gpu(mode, req)
@@ -3891,24 +4060,12 @@ def _trajectory_preview_inner(req: TrajectoryPreviewRequest):
                             detail=f"GPU service unexpected error: {type(e).__name__}: {e}")
 
     # GT: decompress zlib-encoded trajectory arrays before storing in RAM
-    if mode == "gt_leapfrog":
-        result = _decompress_gt_traj(result)
+    result = _decompress_gt_traj(result)
 
-    # Store trajectory arrays in RAM — cell clicks read from here (both modes)
+    # Store trajectory arrays in RAM — cell clicks read from here
     _store_traj_ram_cache(key, result, req.mm_resolution, req.am_resolution)
 
-    # Write to S3 for HNN only — GT is fast enough (~2.3s) to re-run on restart
-    if mode == "hnn_hinge4":
-        full_for_s3 = dict(result)
-        full_for_s3["mode"]          = mode
-        full_for_s3["model_version"] = req.model_version
-        full_for_s3["from_cache"]    = False
-        full_for_s3["cache_key"]     = key
-        threading.Thread(
-            target=_write_cache, args=(mode, key, full_for_s3), daemon=True
-        ).start()
-
-    # Strip heavy arrays for the HTTP response — frontend only needs maps/grids
+    # Strip heavy arrays for the HTTP response
     result = _strip_heavy(result)
     result["mode"]          = mode
     result["model_version"] = req.model_version

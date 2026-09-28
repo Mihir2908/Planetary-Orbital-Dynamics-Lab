@@ -212,6 +212,8 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
   const [trajEngine,        setTrajEngine]        = useState<'gt_leapfrog' | 'hnn_hinge4'>('gt_leapfrog');
   const [trajLoading,       setTrajLoading]        = useState(false);
   const [trajError,         setTrajError]          = useState<string | null>(null);
+  const [trajProgress,      setTrajProgress]       = useState<string | null>(null);
+  const trajPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [trajResultByEngine, setTrajResultByEngine] = useState<Record<string, TrajResult | null>>({
     gt_leapfrog: null,
     hnn_hinge4:  null,
@@ -240,6 +242,16 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       setSelectedCell({ mmIdx, amIdx });
     }
   }, [chatCellFrames, chatCellMmEarth, chatCellAmHill, trajResult]);
+
+  // Cleanup: clear any running HNN poll interval on unmount.
+  useEffect(() => {
+    return () => {
+      if (trajPollRef.current) {
+        clearInterval(trajPollRef.current);
+        trajPollRef.current = null;
+      }
+    };
+  }, []);
 
   // When chatbot calls trajectory_preview and it hits cache, push the result to Layer 2.
   // trajPreview comes via the traj_preview SSE field (separate from ml_prediction) so
@@ -380,12 +392,40 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
   }, [mlPrediction, mlMassIdx, setParam, onApplyAndRun]);
 
   // ── Prediction: Layer 2 Trajectory ────────────────────────────────────────
+  // HNN hinge4 takes ~470s (> NLB 350s TCP idle timeout), so the POST returns
+  // {status:"computing", job_id} immediately. We then poll GET /trajectory/job/{id}/status
+  // every 5s until done/error.  GT leapfrog (~2.3s) gets the result synchronously.
+  const _applyTrajResult = useCallback((data: Record<string, unknown>) => {
+    const result = data as unknown as TrajResult;
+    if (trajEngine === 'hnn_hinge4' && mlPrediction) {
+      const N_MM = result.mm_grid.length;
+      const N_AM = result.am_grid.length;
+      result.confidence_map = Array.from({ length: N_MM }, (_, mi) =>
+        Array.from({ length: N_AM }, (_, ai) => {
+          const mlBoth = mlPrediction.mapBoth[mi]?.[ai] ?? false;
+          if (!mlBoth) return null;
+          return (result.map_both[mi]?.[ai] ?? false) ? 'HIGH' as const : 'LOW' as const;
+        })
+      );
+    }
+    setTrajResultByEngine(prev => ({ ...prev, [trajEngine]: result }));
+    setTrajLoading(false);
+    setTrajProgress(null);
+  }, [trajEngine, mlPrediction]);
+
   const handleTrajBatch = useCallback(async (forceRefresh = false) => {
+    // Stop any existing HNN poll before starting a new request
+    if (trajPollRef.current) {
+      clearInterval(trajPollRef.current);
+      trajPollRef.current = null;
+    }
     setTrajLoading(true);
     setTrajError(null);
+    setTrajProgress(null);
     setSelectedCell(null);
     setSelectedCellFrames(null);
     setPreviewCellFrames(null, null);
+    let asyncJobStarted = false;
     try {
       const res = await fetch(`${AGENT_DIRECT}/trajectory/preview`, {
         method:  'POST',
@@ -400,7 +440,6 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
             ap_AU:    params.ap_AU,
             ep:       params.ep,
           },
-          // HNN gate eval was standardised at 10yr; default to 10 when no sim has been run
           t_sim:           simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0),
           moon_retrograde: params.moon_retrograde,
           em:              params.em,
@@ -419,32 +458,55 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       } catch {
         throw new Error(`Server error (HTTP ${res.status}): ${rawText.slice(0, 300)}`);
       }
+
+      // HNN async path: backend returned job_id, poll for completion
+      if (data.status === 'computing' && data.job_id) {
+        const jobId = data.job_id as string;
+        asyncJobStarted = true;
+        setTrajProgress(`Computing… ${data.elapsed_s ?? 0}s elapsed`);
+        trajPollRef.current = setInterval(async () => {
+          try {
+            const pollRes  = await fetch(`${AGENT_DIRECT}/trajectory/job/${jobId}/status`);
+            const pollData = await pollRes.json() as Record<string, unknown>;
+            if (pollData.status === 'computing') {
+              setTrajProgress(`Computing… ${pollData.elapsed_s ?? '?'}s elapsed`);
+            } else if (pollData.status === 'done') {
+              clearInterval(trajPollRef.current!);
+              trajPollRef.current = null;
+              _applyTrajResult(pollData);
+            } else {
+              // error or unexpected
+              clearInterval(trajPollRef.current!);
+              trajPollRef.current = null;
+              setTrajError((pollData.detail as string | undefined) ?? 'HNN job failed');
+              setTrajLoading(false);
+              setTrajProgress(null);
+            }
+          } catch (pollErr: unknown) {
+            clearInterval(trajPollRef.current!);
+            trajPollRef.current = null;
+            setTrajError(pollErr instanceof Error ? pollErr.message : 'Poll error');
+            setTrajLoading(false);
+            setTrajProgress(null);
+          }
+        }, 5000);
+        return; // loading stays true; finally block must not clear it
+      }
+
+      // Synchronous result (GT leapfrog, or HNN S3 cache hit)
       if (data.ok || data.map_both) {
-        const result = data as unknown as TrajResult;
-        // Compute confidence_map client-side for HNN mode:
-        // HIGH = MLP eligible AND HNN agrees (map_both true)
-        // LOW  = MLP eligible AND HNN disagrees (map_both false)
-        if (trajEngine === 'hnn_hinge4' && mlPrediction) {
-          const N_MM = result.mm_grid.length;
-          const N_AM = result.am_grid.length;
-          result.confidence_map = Array.from({ length: N_MM }, (_, mi) =>
-            Array.from({ length: N_AM }, (_, ai) => {
-              const mlBoth = mlPrediction.mapBoth[mi]?.[ai] ?? false;
-              if (!mlBoth) return null;
-              return (result.map_both[mi]?.[ai] ?? false) ? 'HIGH' as const : 'LOW' as const;
-            })
-          );
-        }
-        setTrajResultByEngine(prev => ({ ...prev, [trajEngine]: result }));
+        _applyTrajResult(data);
       } else {
         setTrajError((data.message as string | undefined) ?? (data.error as string | undefined) ?? 'Trajectory batch failed');
       }
     } catch (e: unknown) {
       setTrajError(e instanceof Error ? e.message : 'Network error');
     } finally {
-      setTrajLoading(false);
+      if (!asyncJobStarted) {
+        setTrajLoading(false);
+      }
     }
-  }, [params, simYears, gridSize, trajEngine, mlPrediction, setPreviewCellFrames]);
+  }, [params, simYears, gridSize, trajEngine, mlPrediction, setPreviewCellFrames, _applyTrajResult]);
 
   const handleCellApplyAndRun = useCallback(() => {
     if (!trajResult || !selectedCell || !selectedCellFrames) return;
@@ -1183,7 +1245,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
                         ? <Loader2 size={11} className="animate-spin" />
                         : <Zap size={11} />}
                       {trajLoading
-                        ? (trajEngine === 'hnn_hinge4' ? 'Running HNN inference… (~470s)' : 'Running batch integrator…')
+                        ? (trajProgress ?? (trajEngine === 'hnn_hinge4' ? 'Submitting HNN job…' : 'Running batch integrator…'))
                         : 'Run Trajectory Batch'}
                     </button>
                     {/* Force-refresh: bypasses S3 cache and re-calls EC2 for fresh HNN result */}

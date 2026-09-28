@@ -328,9 +328,19 @@ export default function HomePage() {
     moon:   bodyRadiusAU(params.mm_earth, dmCgs),
   };
 
-  // Compute HZ from stellar params directly (same formula as habitable_zone.py).
-  // This is the authoritative source — never rely on summary.json or CSV fallbacks.
+  // HZ for the orbit canvas.
+  //
+  // Cell preview frames come from the current system's trajectory grid, so their HZ must
+  // be computed from the current slider params (params.Ts / params.rs_solar).
+  //
+  // Full-simulation frames already have the correct HZ in simMeta (set by the backend
+  // from the star params used at simulation time) — using simMeta directly ensures the
+  // HZ shell always matches the trajectory that is actually displayed, and prevents the
+  // HZ from jumping ahead when the user switches planets before re-running the sim.
   const hzMeta = React.useMemo(() => {
+    if (!simMeta) return null;
+    if (!previewCellFrames) return simMeta; // simulation frames: use sim's own HZ
+    // Cell preview frames: compute from current params so HZ matches the grid system
     const rs_m      = params.rs_solar * 6.957e8;
     const stefboltz = 5.670374419e-8;
     const F_earth   = 1361.0;
@@ -338,10 +348,8 @@ export default function HomePage() {
     const L_star    = 4 * Math.PI * rs_m * rs_m * stefboltz * Math.pow(params.Ts, 4);
     const a_inner   = Math.sqrt(L_star / (4 * Math.PI * 1.1 * F_earth)) / au;
     const a_outer   = Math.sqrt(L_star / (4 * Math.PI * 0.5 * F_earth)) / au;
-    return simMeta
-      ? { ...simMeta, a_inner_au: a_inner, a_outer_au: a_outer }
-      : null;
-  }, [params.Ts, params.rs_solar, simMeta]);
+    return { ...simMeta, a_inner_au: a_inner, a_outer_au: a_outer };
+  }, [params.Ts, params.rs_solar, simMeta, previewCellFrames]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // When a chatbot cell query arrives, show those frames in the 3D canvas and mini orbit

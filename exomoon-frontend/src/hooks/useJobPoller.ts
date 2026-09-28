@@ -5,6 +5,7 @@ import { agentApi } from '@/lib/agentApi';
 import { parseTrajectoryCsv } from '@/lib/csvParser';
 
 const POLL_INTERVAL_MS = 5000;
+const POLL_TIMEOUT_MS  = 300_000; // 5 min — surface "timed out" rather than spinning forever
 
 export function useJobPoller() {
   const {
@@ -12,7 +13,8 @@ export function useJobPoller() {
     updateJobStatus, setTrajectoryData, setSimdata,
   } = useSimulationStore();
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const intervalRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startTimeRef = useRef<number>(0);
 
   useEffect(() => {
     console.log(`[JobPoller] effect fired — jobId=${jobId} jobStatus=${jobStatus}`);
@@ -25,6 +27,13 @@ export function useJobPoller() {
     }
 
     const poll = async () => {
+      if (Date.now() - startTimeRef.current > POLL_TIMEOUT_MS) {
+        clearInterval(intervalRef.current!);
+        intervalRef.current = null;
+        updateJobStatus('TIMED_OUT', (POLL_TIMEOUT_MS / 1000), {});
+        console.warn(`[JobPoller] job ${jobId} timed out after 5 minutes`);
+        return;
+      }
       try {
         console.log(`[JobPoller] polling ${jobId}...`);
         const data = await agentApi.getJobStatus(jobId);
@@ -67,6 +76,7 @@ export function useJobPoller() {
       }
     };
 
+    startTimeRef.current = Date.now();
     intervalRef.current = setInterval(poll, POLL_INTERVAL_MS);
     poll(); // immediate first check
 
