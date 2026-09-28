@@ -54,29 +54,29 @@ export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOver
   const moonOrbits   = T_moon   > 0 ? Math.floor(simTime / T_moon)   : 0;
 
   return (
-    <div className="absolute top-3 left-3 pointer-events-none space-y-1.5">
-      {/* Stability badge */}
-      <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
-        escaped
-          ? 'bg-red-900/70 text-red-300 border border-red-700/50'
-          : 'bg-green-900/70 text-green-300 border border-green-700/50'
-      }`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${escaped ? 'bg-red-400' : 'bg-green-400'}`} />
-        {escaped ? 'Moon Escaped' : 'Stable'}
-      </div>
-
-      {/* Habitability badge */}
-      <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
-        inHZ
-          ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-700/50'
-          : 'bg-orange-900/70 text-orange-300 border border-orange-700/50'
-      }`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${inHZ ? 'bg-emerald-400' : 'bg-orange-400'}`} />
-        {inHZ ? 'Habitable' : 'Uninhabitable'}
+    <div id="tutorial-orbit-overlay" className="absolute top-3 left-3 pointer-events-none space-y-1.5">
+      {/* Stability + habitability badges */}
+      <div id="tutorial-stability-badges" className="space-y-1.5">
+        <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
+          escaped
+            ? 'bg-red-900/70 text-red-300 border border-red-700/50'
+            : 'bg-green-900/70 text-green-300 border border-green-700/50'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${escaped ? 'bg-red-400' : 'bg-green-400'}`} />
+          {escaped ? 'Moon Escaped' : 'Stable'}
+        </div>
+        <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
+          inHZ
+            ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-700/50'
+            : 'bg-orange-900/70 text-orange-300 border border-orange-700/50'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${inHZ ? 'bg-emerald-400' : 'bg-orange-400'}`} />
+          {inHZ ? 'Habitable' : 'Uninhabitable'}
+        </div>
       </div>
 
       {/* Data readouts — no backdrop-blur so objects show through */}
-      <div className="bg-black/45 rounded px-2.5 py-2 space-y-1 border border-gray-700/40 min-w-[230px]">
+      <div id="tutorial-orbit-data" className="bg-black/45 rounded px-2.5 py-2 space-y-1 border border-gray-700/40 min-w-[230px]">
         <Row label="Time"   value={`${fmt(simTime, 3)} yr`} />
         <Row label="Frame"  value={`${frameIndex + 1} / ${totalFrames}`} />
 

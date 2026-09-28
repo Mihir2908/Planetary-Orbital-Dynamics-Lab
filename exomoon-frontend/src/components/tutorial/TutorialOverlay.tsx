@@ -1,11 +1,12 @@
 'use client';
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 
 interface TutorialStep {
   title: string;
   body: string;
   targetId: string | null;
   cardSide: 'below' | 'above' | 'left' | 'right' | 'center';
+  requiresSim?: boolean;
 }
 
 const STEPS: TutorialStep[] = [
@@ -20,12 +21,28 @@ const STEPS: TutorialStep[] = [
     body: 'The main view renders the three-body system in 3D. Yellow = star, blue = planet, red = moon. Drag to rotate, scroll to zoom. The green shell is the star\'s habitable zone (HZ). After running an ML prediction a violet shell shows the predicted stable+habitable orbit range for the selected moon mass.',
     targetId: 'tutorial-canvas-area',
     cardSide: 'center',
+    requiresSim: true,
   },
   {
     title: 'Body Legend',
     body: 'This legend identifies the three bodies. Use the Star, Planet, and Moon buttons below it to open parameter panels — set stellar temperature, planet mass, moon orbit radius, and more.',
     targetId: 'tutorial-legend',
     cardSide: 'below',
+    requiresSim: true,
+  },
+  {
+    title: 'Stability & Habitability Status',
+    body: 'These badges update live as the animation plays. Green "Stable" means the moon is within the Hill sphere. "Habitable" means the moon\'s distance from the star falls within the computed habitable zone. Both badges change colour in real time — red/orange signals an escaped or uninhabitable moon.',
+    targetId: 'tutorial-stability-badges',
+    cardSide: 'right',
+    requiresSim: true,
+  },
+  {
+    title: 'Live System Readout',
+    body: 'This panel streams live per-frame data: moon–planet distance as a fraction of the Hill radius, planet–star distance, orbital speeds, moon equilibrium temperature, orbital periods, and cumulative orbit counts. All values update continuously as you scrub or play the animation.',
+    targetId: 'tutorial-orbit-data',
+    cardSide: 'right',
+    requiresSim: true,
   },
   {
     title: 'Star Parameters',
@@ -49,13 +66,14 @@ const STEPS: TutorialStep[] = [
     title: 'Run Simulation',
     body: 'Click Run to submit a full three-body simulation to the physics backend. The Numba-compiled leapfrog integrator runs on the cloud and returns the trajectory in roughly 10–60 seconds. The 3D canvas updates automatically when the job completes.',
     targetId: 'tutorial-run-btn',
-    cardSide: 'above',
+    cardSide: 'below',
   },
   {
     title: 'Playback Controls',
     body: 'Once a simulation completes, the playback bar appears at the bottom. Scrub through time, play/pause the animation, or change the speed multiplier. The ⊙ Zoom-to-Fit button resets the camera to frame all three bodies if you get lost.',
     targetId: 'tutorial-playback',
     cardSide: 'above',
+    requiresSim: true,
   },
   {
     title: 'EDA — Exploratory Data Analysis',
@@ -74,6 +92,7 @@ const STEPS: TutorialStep[] = [
     body: 'The mini orbit view shows the moon\'s orbit around the planet up close. After an ML prediction, dashed arcs mark the predicted stable orbit bounds — cyan inner edge, violet outer edge. Roche and Hill limit rings appear when previewing individual grid cells.',
     targetId: 'tutorial-mini-orbit',
     cardSide: 'above',
+    requiresSim: true,
   },
   {
     title: 'AI Agent Chatbot',
@@ -90,39 +109,44 @@ const STEPS: TutorialStep[] = [
 ];
 
 const CARD_W   = 340;
-const CARD_PAD = 16; // gap between highlight edge and card
-const MARGIN   = 12; // minimum gap from screen edge
-const HL_PAD   = 8;  // padding around highlighted element
+const CARD_PAD = 16;
+const MARGIN   = 12;
+const HL_PAD   = 8;
 
 interface HighlightRect { x: number; y: number; w: number; h: number }
 
 interface TutorialOverlayProps {
   onClose: () => void;
+  simReady: boolean;
+  startStep?: number;
 }
 
-export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
-  const [step, setStep]   = useState(0);
-  const [hl, setHl]       = useState<HighlightRect | null>(null);
-  const [vp, setVp]       = useState({ w: window.innerWidth, h: window.innerHeight });
+export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOverlayProps) {
+  const filteredSteps = useMemo(
+    () => simReady ? STEPS : STEPS.filter(s => !s.requiresSim),
+    [simReady]
+  );
 
-  const s      = STEPS[step];
-  const isLast = step === STEPS.length - 1;
+  const [step, setStep] = useState(() => Math.min(startStep, filteredSteps.length - 1));
+  const [hl,   setHl]   = useState<HighlightRect | null>(null);
+  const [vp,   setVp]   = useState({ w: window.innerWidth, h: window.innerHeight });
+
+  const s      = filteredSteps[step] ?? filteredSteps[0];
+  const isLast = step === filteredSteps.length - 1;
 
   const measure = useCallback(() => {
-    if (!s.targetId) { setHl(null); return; }
+    if (!s?.targetId) { setHl(null); return; }
     const el = document.getElementById(s.targetId);
     if (!el) { setHl(null); return; }
     const r = el.getBoundingClientRect();
     setHl({ x: r.left - HL_PAD, y: r.top - HL_PAD, w: r.width + HL_PAD * 2, h: r.height + HL_PAD * 2 });
-  }, [s.targetId]);
+  }, [s?.targetId]);
 
-  // Re-measure when step changes (small delay lets DOM settle)
   useEffect(() => {
     const t = setTimeout(measure, 60);
     return () => clearTimeout(t);
   }, [measure]);
 
-  // Re-measure on resize
   useEffect(() => {
     const onResize = () => { setVp({ w: window.innerWidth, h: window.innerHeight }); measure(); };
     window.addEventListener('resize', onResize);
@@ -132,7 +156,7 @@ export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
   const next = () => { if (isLast) { onClose(); } else { setStep(v => v + 1); } };
   const prev = () => setStep(v => Math.max(0, v - 1));
 
-  // ── Card position ──────────────────────────────────────────────────────────
+  // ── Card positioning ──────────────────────────────────────────────────────
   let cardStyle: React.CSSProperties;
   if (!hl || s.cardSide === 'center') {
     cardStyle = { position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: CARD_W };
@@ -143,8 +167,13 @@ export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
     if (s.cardSide === 'below') {
       cardStyle = { position: 'fixed', top: hl.y + hl.h + CARD_PAD, left: clampLeft(cx - CARD_W / 2), width: CARD_W };
     } else if (s.cardSide === 'above') {
-      const bottom = vp.h - hl.y + CARD_PAD;
-      cardStyle = { position: 'fixed', bottom, left: clampLeft(cx - CARD_W / 2), width: CARD_W };
+      if (hl.y < vp.h / 2) {
+        // Element in top half — place card below it to avoid going off-screen
+        cardStyle = { position: 'fixed', top: hl.y + hl.h + CARD_PAD, left: clampLeft(cx - CARD_W / 2), width: CARD_W };
+      } else {
+        const bottom = vp.h - hl.y + CARD_PAD;
+        cardStyle = { position: 'fixed', bottom, left: clampLeft(cx - CARD_W / 2), width: CARD_W };
+      }
     } else if (s.cardSide === 'left') {
       const preferred = hl.x - CARD_W - CARD_PAD;
       const left = preferred < MARGIN ? hl.x + hl.w + CARD_PAD : preferred;
@@ -174,17 +203,8 @@ export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
                 <rect x={hl.x} y={hl.y} width={hl.w} height={hl.h} rx="7" fill="black" />
               </mask>
             </defs>
-            <rect
-              width={vp.w} height={vp.h}
-              fill="rgba(0,0,0,0.62)"
-              mask="url(#tut-spotlight-mask)"
-            />
-            {/* Highlight border */}
-            <rect
-              x={hl.x} y={hl.y} width={hl.w} height={hl.h}
-              rx="7" fill="none"
-              stroke="#3b82f6" strokeWidth="1.5"
-            />
+            <rect width={vp.w} height={vp.h} fill="rgba(0,0,0,0.62)" mask="url(#tut-spotlight-mask)" />
+            <rect x={hl.x} y={hl.y} width={hl.w} height={hl.h} rx="7" fill="none" stroke="#3b82f6" strokeWidth="1.5" />
           </>
         ) : (
           <rect width={vp.w} height={vp.h} fill="rgba(0,0,0,0.62)" />
@@ -197,13 +217,13 @@ export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
         className="bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-4"
         onClick={e => e.stopPropagation()}
       >
-        {/* Header row: step count + dot indicators */}
+        {/* Header row */}
         <div className="flex items-center justify-between">
           <span className="text-[10px] font-mono text-gray-500 tracking-wider uppercase">
-            Step {step + 1} / {STEPS.length}
+            Step {step + 1} / {filteredSteps.length}
           </span>
           <div className="flex gap-1">
-            {STEPS.map((_, i) => (
+            {filteredSteps.map((_, i) => (
               <button
                 key={i}
                 onClick={() => setStep(i)}
@@ -225,16 +245,13 @@ export function TutorialOverlay({ onClose }: TutorialOverlayProps) {
         <div className="w-full h-0.5 bg-gray-800 rounded-full overflow-hidden">
           <div
             className="h-full bg-blue-500 transition-all duration-300"
-            style={{ width: `${((step + 1) / STEPS.length) * 100}%` }}
+            style={{ width: `${((step + 1) / filteredSteps.length) * 100}%` }}
           />
         </div>
 
         {/* Actions */}
         <div className="flex items-center justify-between">
-          <button
-            onClick={onClose}
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          >
+          <button onClick={onClose} className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
             Skip Tutorial
           </button>
           <div className="flex items-center gap-2">

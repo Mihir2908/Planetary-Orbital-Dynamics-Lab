@@ -304,8 +304,10 @@ export default function HomePage() {
   const [showMl,         setShowMl]         = useState(false);
   const [showFullscreen, setShowFullscreen] = useState(false);
   const [stripCollapsed, setStripCollapsed] = useState(false);
-  // Tutorial opens on every page load
-  const [tutorialOpen,   setTutorialOpen]   = useState(true);
+  // Tutorial: opens on every page load; also auto-opens once after first sim completes
+  const [tutorialOpen,            setTutorialOpen]            = useState(true);
+  const [tutorialStartStep,       setTutorialStartStep]       = useState(0);
+  const [hasShownPostSimTutorial, setHasShownPostSimTutorial] = useState(false);
   // Info modal state for canvas overlay
   const [showCanvasInfo, setShowCanvasInfo] = useState(false);
 
@@ -337,19 +339,10 @@ export default function HomePage() {
     moon:   bodyRadiusAU(params.mm_earth, dmCgs),
   };
 
-  // HZ for the orbit canvas.
-  //
-  // Cell preview frames come from the current system's trajectory grid, so their HZ must
-  // be computed from the current slider params (params.Ts / params.rs_solar).
-  //
-  // Full-simulation frames already have the correct HZ in simMeta (set by the backend
-  // from the star params used at simulation time) — using simMeta directly ensures the
-  // HZ shell always matches the trajectory that is actually displayed, and prevents the
-  // HZ from jumping ahead when the user switches planets before re-running the sim.
+  // HZ for the orbit canvas — always computed from current star params so the
+  // green shell updates live when the user adjusts Ts / rs_solar or switches system.
   const hzMeta = React.useMemo(() => {
     if (!simMeta) return null;
-    if (!previewCellFrames) return simMeta; // simulation frames: use sim's own HZ
-    // Cell preview frames: compute from current params so HZ matches the grid system
     const rs_m      = params.rs_solar * 6.957e8;
     const stefboltz = 5.670374419e-8;
     const F_earth   = 1361.0;
@@ -358,7 +351,7 @@ export default function HomePage() {
     const a_inner   = Math.sqrt(L_star / (4 * Math.PI * 1.1 * F_earth)) / au;
     const a_outer   = Math.sqrt(L_star / (4 * Math.PI * 0.5 * F_earth)) / au;
     return { ...simMeta, a_inner_au: a_inner, a_outer_au: a_outer };
-  }, [params.Ts, params.rs_solar, simMeta, previewCellFrames]);
+  }, [params.Ts, params.rs_solar, simMeta]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // When a chatbot cell query arrives, show those frames in the 3D canvas and mini orbit
@@ -406,6 +399,15 @@ export default function HomePage() {
     else if (jobStatus === 'succeeded') { showStatus('Simulation complete — scene updated'); scheduleStatusFade(); }
     else if (jobStatus === 'failed')    { showStatus('Job failed or timed out');             scheduleStatusFade(); }
   }, [jobStatus, showStatus, scheduleStatusFade]);
+
+  // Auto-open tutorial at the first post-sim step when a simulation first completes
+  useEffect(() => {
+    if (trajectoryFrames && !hasShownPostSimTutorial) {
+      setHasShownPostSimTutorial(true);
+      setTutorialStartStep(1); // index 1 = "3D Orbit Canvas" (first post-sim step)
+      setTutorialOpen(true);
+    }
+  }, [trajectoryFrames, hasShownPostSimTutorial]);
 
   const handleRun = useCallback(async () => {
     showStatus('Starting simulation…');
@@ -765,7 +767,7 @@ export default function HomePage() {
 
       {/* Tutorial FAB — ? button above chatbot FAB */}
       <button
-        onClick={() => setTutorialOpen(true)}
+        onClick={() => { setTutorialStartStep(0); setTutorialOpen(true); }}
         className="fixed bottom-[76px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
                    flex items-center justify-center transition-colors
                    bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
@@ -774,8 +776,14 @@ export default function HomePage() {
         <HelpCircle size={20} className="text-gray-300" />
       </button>
 
-      {/* Tutorial overlay — auto-opens on every load */}
-      {tutorialOpen && <TutorialOverlay onClose={() => setTutorialOpen(false)} />}
+      {/* Tutorial overlay — auto-opens on every load; re-opens after first sim completes */}
+      {tutorialOpen && (
+        <TutorialOverlay
+          onClose={() => setTutorialOpen(false)}
+          simReady={!!trajectoryFrames}
+          startStep={tutorialStartStep}
+        />
+      )}
     </>
   );
 }
