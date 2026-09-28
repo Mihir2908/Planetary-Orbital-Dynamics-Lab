@@ -4,7 +4,11 @@ import {
   BarChart2, X, GripHorizontal, Sun, Globe, Moon,
   CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain, HelpCircle, Info,
 } from 'lucide-react';
-import { TutorialOverlay } from '@/components/tutorial/TutorialOverlay';
+import dynamic from 'next/dynamic';
+const TutorialOverlay = dynamic(
+  () => import('@/components/tutorial/TutorialOverlay').then(m => ({ default: m.TutorialOverlay })),
+  { ssr: false }
+);
 import { AppShell } from '@/components/layout/AppShell';
 import { OrbitCanvas } from '@/components/animation/OrbitCanvas';
 import { OrbitOverlay } from '@/components/animation/OrbitOverlay';
