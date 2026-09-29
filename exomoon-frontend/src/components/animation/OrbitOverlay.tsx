@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
 import {
   moonEffectiveTempK, orbitalPeriodYr, EARTH_MASS_SOLAR,
@@ -17,7 +17,33 @@ function fmt(v: number, d = 4) { return v.toFixed(d); }
 
 export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOverlayProps) {
   const { params } = useSimulationStore();
-  const [infoOpen, setInfoOpen] = useState(false);
+  const [infoOpen,  setInfoOpen]  = useState(false);
+  const [infoDragPos, setInfoDragPos] = useState<{ x: number; y: number } | null>(null);
+  const infoDragOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const isInfoDraggingRef = useRef(false);
+
+  const onInfoGripMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const modal = (e.currentTarget as HTMLElement).closest('[data-info-modal]') as HTMLElement | null;
+    if (!modal) return;
+    const rect = modal.getBoundingClientRect();
+    infoDragOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    isInfoDraggingRef.current = true;
+
+    const onMouseMove = (me: MouseEvent) => {
+      if (!isInfoDraggingRef.current) return;
+      setInfoDragPos({ x: me.clientX - infoDragOffsetRef.current.x, y: me.clientY - infoDragOffsetRef.current.y });
+    };
+    const onMouseUp = () => {
+      isInfoDraggingRef.current = false;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, []);
+
   if (!frame || !meta) return null;
 
   const moonPlanetDist = frame.moon_planet_dist ?? 0;
@@ -99,13 +125,27 @@ export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOver
               onClick={() => setInfoOpen(false)}
             />
             <div
-              className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
-                         w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3"
-              style={{ pointerEvents: 'auto' }}
+              data-info-modal
+              className="fixed z-50 w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3"
+              style={infoDragPos
+                ? { pointerEvents: 'auto', top: infoDragPos.y, left: infoDragPos.x }
+                : { pointerEvents: 'auto', top: '50%', left: '50%', transform: 'translate(-50%,-50%)' }
+              }
+              onClick={e => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div
+                  onMouseDown={onInfoGripMouseDown}
+                  title="Drag to reposition"
+                  className="cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 transition-colors text-sm leading-none select-none"
+                >⠿</div>
                 <span className="text-xs font-semibold text-white">Live System Readout</span>
-                <button onClick={() => setInfoOpen(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
+                <div className="ml-auto flex items-center gap-2">
+                  {infoDragPos && (
+                    <button onClick={() => setInfoDragPos(null)} title="Reset position" className="text-gray-600 hover:text-gray-300 text-[10px] transition-colors">↩</button>
+                  )}
+                  <button onClick={() => setInfoOpen(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
+                </div>
               </div>
               <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
                 <p>All values update every frame as the animation plays or is scrubbed.</p>
