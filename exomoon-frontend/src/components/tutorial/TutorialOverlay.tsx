@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 
 interface TutorialStep {
   title: string;
@@ -131,6 +131,11 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
   const [hl,   setHl]   = useState<HighlightRect | null>(null);
   const [vp,   setVp]   = useState({ w: window.innerWidth, h: window.innerHeight });
 
+  // Drag state
+  const [dragPos,    setDragPos]    = useState<{ x: number; y: number } | null>(null);
+  const dragOffsetRef               = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const isDraggingRef               = useRef(false);
+
   const s      = filteredSteps[step] ?? filteredSteps[0];
   const isLast = step === filteredSteps.length - 1;
 
@@ -155,6 +160,29 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
 
   const next = () => { if (isLast) { onClose(); } else { setStep(v => v + 1); } };
   const prev = () => setStep(v => Math.max(0, v - 1));
+
+  // Drag handlers
+  const onGripMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const cardEl = (e.currentTarget as HTMLElement).closest('[data-tutorial-card]') as HTMLElement | null;
+    if (!cardEl) return;
+    const rect = cardEl.getBoundingClientRect();
+    dragOffsetRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    isDraggingRef.current = true;
+
+    const onMouseMove = (me: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      setDragPos({ x: me.clientX - dragOffsetRef.current.x, y: me.clientY - dragOffsetRef.current.y });
+    };
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, []);
 
   // ── Card positioning ──────────────────────────────────────────────────────
   let cardStyle: React.CSSProperties;
@@ -187,6 +215,11 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
     }
   }
 
+  // Dragged position overrides computed position
+  if (dragPos) {
+    cardStyle = { position: 'fixed', top: dragPos.y, left: dragPos.x, width: CARD_W };
+  }
+
   return (
     <div className="fixed inset-0 z-[200]" style={{ pointerEvents: 'none' }}>
       {/* SVG overlay with spotlight cutout */}
@@ -213,25 +246,47 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
 
       {/* Card */}
       <div
+        data-tutorial-card
         style={{ ...cardStyle, pointerEvents: 'auto' }}
         className="bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-4"
         onClick={e => e.stopPropagation()}
       >
         {/* Header row */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
+          {/* Drag grip */}
+          <div
+            onMouseDown={onGripMouseDown}
+            title="Drag to reposition"
+            className="flex items-center gap-1 cursor-grab active:cursor-grabbing shrink-0"
+          >
+            <span className="text-gray-600 hover:text-gray-400 transition-colors text-sm leading-none select-none">⠿</span>
+          </div>
+
           <span className="text-[10px] font-mono text-gray-500 tracking-wider uppercase">
             Step {step + 1} / {filteredSteps.length}
           </span>
-          <div className="flex gap-1">
-            {filteredSteps.map((_, i) => (
+
+          <div className="flex items-center gap-1.5 ml-auto">
+            {dragPos && (
               <button
-                key={i}
-                onClick={() => setStep(i)}
-                className={`w-1.5 h-1.5 rounded-full transition-colors ${
-                  i === step ? 'bg-blue-400' : 'bg-gray-700 hover:bg-gray-500'
-                }`}
-              />
-            ))}
+                onClick={() => setDragPos(null)}
+                title="Reset position"
+                className="text-gray-600 hover:text-gray-300 text-[10px] transition-colors"
+              >
+                ↩
+              </button>
+            )}
+            <div className="flex gap-1">
+              {filteredSteps.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setStep(i)}
+                  className={`w-1.5 h-1.5 rounded-full transition-colors ${
+                    i === step ? 'bg-blue-400' : 'bg-gray-700 hover:bg-gray-500'
+                  }`}
+                />
+              ))}
+            </div>
           </div>
         </div>
 

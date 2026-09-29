@@ -108,14 +108,15 @@ export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOver
                 <button onClick={() => setInfoOpen(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
               </div>
               <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
-                <p>All values update per animation frame as the simulation plays or is scrubbed.</p>
+                <p>All values update every frame as the animation plays or is scrubbed.</p>
                 <ul className="space-y-1.5 pl-3 list-disc">
-                  <li><span className="text-blue-300">Moon–Planet dist</span> — separation in AU with Hill-radius fraction. Exceeding 1 R_Hill marks an escape event.</li>
-                  <li><span className="text-blue-300">Planet–Star / Moon–Star</span> — heliocentric distances. Moon–Star is used to evaluate habitable zone membership.</li>
-                  <li><span className="text-blue-300">Orbital speeds</span> — instantaneous AU/yr velocities for moon and planet.</li>
-                  <li><span className="text-blue-300">Moon T_eff</span> — equilibrium surface temperature (Stefan–Boltzmann), computed from stellar luminosity and moon–star distance.</li>
-                  <li><span className="text-blue-300">T_planet / T_moon</span> — Keplerian orbital periods from Kepler's 3rd law.</li>
-                  <li><span className="text-blue-300">Orbit counters</span> — cumulative complete orbits elapsed in simulated time.</li>
+                  <li><span className="text-blue-300">Moon–Planet dist</span> — how far the moon is from the planet, in AU, plus what percentage of the planet's Hill radius (gravitational sphere of influence) that distance represents. Once this reaches 100% R_Hill the moon has escaped the planet.</li>
+                  <li><span className="text-blue-300">Planet–Star dist</span> — how far the planet is from the star, in AU.</li>
+                  <li><span className="text-blue-300">Moon–Star dist</span> — how far the moon is from the star, in AU. This is compared to the habitable zone inner and outer boundaries to decide whether liquid water could exist on the moon's surface.</li>
+                  <li><span className="text-blue-300">Moon / Planet speed</span> — how fast the moon and planet are each moving through space at that instant, in AU per year.</li>
+                  <li><span className="text-blue-300">Moon T_eff</span> — the equilibrium surface temperature the moon would reach by absorbing and re-emitting the star's radiation at its current distance. Roughly 200–350 K suggests conditions compatible with liquid water.</li>
+                  <li><span className="text-blue-300">T_planet / T_moon</span> — how long one complete orbit takes for the planet (around the star) and the moon (around the planet), computed from their orbital radii.</li>
+                  <li><span className="text-blue-300">Orbit counters</span> — how many full orbits the planet and moon have each completed since the simulation started.</li>
                 </ul>
                 <p className="text-gray-500 text-[10px]">Green values are within stable or habitable bounds; red values indicate an escaped or uninhabitable state at that frame.</p>
               </div>
