@@ -83,7 +83,7 @@ const STEPS: TutorialStep[] = [
   },
   {
     title: 'ML Stability Predictor',
-    body: 'Click ML to open the stability predictor. Layer 1 runs the MLP classifier across a 50×50 grid of moon mass and orbit radius — results appear in seconds with no simulation needed. Layer 2 runs the physics integrator across the same grid for higher fidelity.',
+    body: 'Click ML to open the two-layer stability predictor. Layer 1 runs a trained MLP classifier across a default 30×30 grid of moon mass × orbit radius — it classifies each cell as stable and habitable or not, using pure neural inference in seconds with no physics simulation. Layer 2 sweeps the same grid with full trajectory fidelity; you choose between two physics engines: Ground Truth Physics Integrator — the exact same Numba leapfrog integrator as the main simulation, giving fully accurate trajectories — or HNN Physics ML Model (Beta), a physics-informed neural network that approximates trajectories at much lower compute cost.',
     targetId: 'tutorial-ml-fab',
     cardSide: 'below',
   },

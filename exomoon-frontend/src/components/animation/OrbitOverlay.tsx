@@ -1,5 +1,5 @@
 'use client';
-import React from 'react';
+import React, { useState } from 'react';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
 import {
   moonEffectiveTempK, orbitalPeriodYr, EARTH_MASS_SOLAR,
@@ -17,6 +17,7 @@ function fmt(v: number, d = 4) { return v.toFixed(d); }
 
 export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOverlayProps) {
   const { params } = useSimulationStore();
+  const [infoOpen, setInfoOpen] = useState(false);
   if (!frame || !meta) return null;
 
   const moonPlanetDist = frame.moon_planet_dist ?? 0;
@@ -76,7 +77,52 @@ export function OrbitOverlay({ frame, frameIndex, totalFrames, meta }: OrbitOver
       </div>
 
       {/* Data readouts — no backdrop-blur so objects show through */}
-      <div id="tutorial-orbit-data" className="bg-black/45 rounded px-2.5 py-2 space-y-1 border border-gray-700/40 min-w-[230px]">
+      <div id="tutorial-orbit-data" className="relative bg-black/45 rounded px-2.5 py-2 space-y-1 border border-gray-700/40 min-w-[230px]">
+        {/* Info button — pointer-events-auto overrides parent none */}
+        <button
+          onClick={() => setInfoOpen(v => !v)}
+          title="About this readout"
+          className="absolute -top-1.5 -right-6 w-5 h-5 flex items-center justify-center rounded-full
+                     text-gray-500 hover:text-blue-400 hover:bg-blue-900/20 transition-colors
+                     text-[11px] border border-gray-700/50 bg-gray-900/70 pointer-events-auto"
+          style={{ pointerEvents: 'auto' }}
+        >
+          ℹ
+        </button>
+
+        {/* Info modal */}
+        {infoOpen && (
+          <>
+            <div
+              className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm"
+              style={{ pointerEvents: 'auto' }}
+              onClick={() => setInfoOpen(false)}
+            />
+            <div
+              className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2
+                         w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3"
+              style={{ pointerEvents: 'auto' }}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-white">Live System Readout</span>
+                <button onClick={() => setInfoOpen(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
+              </div>
+              <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
+                <p>All values update per animation frame as the simulation plays or is scrubbed.</p>
+                <ul className="space-y-1.5 pl-3 list-disc">
+                  <li><span className="text-blue-300">Moon–Planet dist</span> — separation in AU with Hill-radius fraction. Exceeding 1 R_Hill marks an escape event.</li>
+                  <li><span className="text-blue-300">Planet–Star / Moon–Star</span> — heliocentric distances. Moon–Star is used to evaluate habitable zone membership.</li>
+                  <li><span className="text-blue-300">Orbital speeds</span> — instantaneous AU/yr velocities for moon and planet.</li>
+                  <li><span className="text-blue-300">Moon T_eff</span> — equilibrium surface temperature (Stefan–Boltzmann), computed from stellar luminosity and moon–star distance.</li>
+                  <li><span className="text-blue-300">T_planet / T_moon</span> — Keplerian orbital periods from Kepler's 3rd law.</li>
+                  <li><span className="text-blue-300">Orbit counters</span> — cumulative complete orbits elapsed in simulated time.</li>
+                </ul>
+                <p className="text-gray-500 text-[10px]">Green values are within stable or habitable bounds; red values indicate an escaped or uninhabitable state at that frame.</p>
+              </div>
+            </div>
+          </>
+        )}
+
         <Row label="Time"   value={`${fmt(simTime, 3)} yr`} />
         <Row label="Frame"  value={`${frameIndex + 1} / ${totalFrames}`} />
 

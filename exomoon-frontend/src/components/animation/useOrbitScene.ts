@@ -357,13 +357,15 @@ export function useOrbitScene(
     scene.add(hzShell);
     hzOuterRef.current = hzShell;
 
-    // Auto-fit camera
+    // Auto-fit camera to this simulation's extent, then save that position as
+    // the reset target so Zoom-to-Fit always snaps back to the per-sim fitted view.
     const allX = frames.map(f => Math.max(Math.abs(f.star_x), Math.abs(f.planet_x), Math.abs(f.moon_x)));
     const maxExtent = Math.max(...allX, a_outer_au) * 1.5;
     if (cameraRef.current && controlsRef.current) {
       cameraRef.current.position.set(0, maxExtent * 0.6, maxExtent * 1.2);
       controlsRef.current.target.set(0, 0, 0);
       controlsRef.current.update();
+      controlsRef.current.saveState(); // reset() will return here, not to construction-time (0,3,6)
     }
 
   }, [frames, meta]);
