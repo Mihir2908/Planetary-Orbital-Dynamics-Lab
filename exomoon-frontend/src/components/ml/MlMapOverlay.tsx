@@ -620,12 +620,15 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     const M_EARTH_MSUN = 3.003e-6;
     const localRhill = params.ap_AU * (1 - params.ep) *
       Math.cbrt(params.mp_earth * M_EARTH_MSUN / (3 * params.ms_solar));
+    // Preserve backend-authoritative HZ from the most recent simulation.
+    // batchHzRef is used only when no simulation has been run yet.
+    const prevSimMeta = useSimulationStore.getState().simMeta;
     const batchHz = batchHzRef.current;
     const meta: SimulationMeta = {
       dt:         tSim / Math.max(selectedCellFrames.length - 1, 1),
       t_end:      tSim,
-      a_inner_au: batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
-      a_outer_au: batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
+      a_inner_au: prevSimMeta?.a_inner_au ?? batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
+      a_outer_au: prevSimMeta?.a_outer_au ?? batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
       rhill_AU:   localRhill,
     };
     setTrajectoryData(selectedCellFrames, meta);
@@ -730,12 +733,15 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       // Use batchHzRef (captured at batch-request time) not current params — slider state
       // may have drifted since the batch ran.
       const tSim   = simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0);
+      // Preserve backend-authoritative HZ from the most recent simulation.
+      // batchHzRef is used only when no simulation has been run yet.
+      const prevSimMeta = useSimulationStore.getState().simMeta;
       const batchHz = batchHzRef.current;
       const meta: SimulationMeta = {
         dt:         tSim / Math.max(frames.length - 1, 1),
         t_end:      tSim,
-        a_inner_au: batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
-        a_outer_au: batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
+        a_inner_au: prevSimMeta?.a_inner_au ?? batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
+        a_outer_au: prevSimMeta?.a_outer_au ?? batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
         rhill_AU:   rhillAULocal,
       };
       setTrajectoryData(frames, meta);
