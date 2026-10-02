@@ -1432,6 +1432,24 @@ def _execute_tool(tool_name: str, tool_input: Dict[str, Any], req: ChatRequest, 
 
                 # GT: call GPU directly (2.3s). HNN cache hit: trajectory_preview() serves from S3/RAM.
                 result  = trajectory_preview(traj_req)
+
+                # EC2 is starting up — tell Claude to inform the user and do nothing else.
+                if not result.get("ok", True) and result.get("warming_up"):
+                    wait_min = result.get("estimated_wait_s", 180) // 60
+                    return {
+                        "ok": False,
+                        "warming_up": True,
+                        "estimated_wait_s": result.get("estimated_wait_s", 180),
+                        "message": (
+                            f"The physics computing engine is starting up (~{wait_min} min warm-up). "
+                            "Tell the user: 'The computing engine is warming up — this takes about "
+                            f"{wait_min}–{wait_min + 1} minutes. The page will retry automatically every "
+                            "20 seconds, so just wait.' "
+                            "Do NOT say the backend is unreachable or broken. "
+                            "Do NOT suggest alternative tools or name any tools."
+                        ),
+                    }
+
                 mm_grid = result.get("mm_grid", [])
                 am_grid = result.get("am_grid", [])
                 map_both    = result.get("map_both", [])
@@ -2342,7 +2360,7 @@ def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
         "Always respond in **Markdown**. Use headers, bullet points, bold, and code blocks where appropriate. "
         "Provide numerical results with units. Keep responses focused and concise.\n\n"
 
-        "## Language — never expose internal parameter names\n"
+        "## Language — never expose internal names\n"
         "NEVER write raw parameter names (from `context.params`, `context.derived`, tool schemas, or any internal "
         "field names) in your responses. Users see plain English, not code. Always translate to natural language:\n"
         "- `moon_in_hz` → 'planet orbit inside the habitable zone' or 'habitable zone position'\n"
@@ -2372,7 +2390,20 @@ def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
         "Never write a parameter name as if it is a label — always write what it means in plain words. "
         "This includes ALL context keys: `has_simdata`, `years_hint`, `escape_factor`, `aws_enabled`, etc. "
         "If you find yourself about to write a word that looks like a Python identifier (snake_case), "
-        "stop and rephrase it in plain English.\n\n"
+        "stop and rephrase it in plain English.\n"
+        "This rule also covers **tool and function names**: NEVER mention tool names such as "
+        "`ml_predict`, `trajectory_preview`, `stability_from_simdata`, `start_backend_job`, `ml_train`, "
+        "`eda_plot`, `export_csv`, `fetch_exoplanet`, or any other function name in your responses. "
+        "Describe what you are doing in plain English ('running the stability grid', 'fetching system data', "
+        "'starting a simulation', etc.).\n\n"
+
+        "## GPU warm-up — how to respond\n"
+        "If a tool returns `warming_up: true`, the physics computing engine is starting up (not broken). "
+        "Tell the user exactly this: 'The computing engine is warming up — this takes about 2–3 minutes. "
+        "The page will retry automatically, so just wait.' "
+        "Do NOT say the backend is unreachable, down, or erroring. "
+        "Do NOT suggest alternative tools or describe any fallback workflow. "
+        "Do NOT mention the GPU, EC2, cloud infrastructure, or any internal name.\n\n"
 
         "## Parameter elicitation — foundational principle\n"
         "You are an inquisitive assistant. Your default stance is to ask, not to assume.\n\n"
@@ -4117,6 +4148,11 @@ def _trajectory_preview_inner(req: TrajectoryPreviewRequest):
     except Exception as e:
         raise HTTPException(status_code=502,
                             detail=f"GPU service unexpected error: {type(e).__name__}: {e}")
+
+    # _forward_to_gpu returns warming_up dict (not raises) when EC2 is starting up.
+    # Return it immediately — do NOT fall through to decompression or RAM cache storage.
+    if not result.get("ok", True) and result.get("warming_up"):
+        return result
 
     # GT: decompress zlib-encoded trajectory arrays before storing in RAM
     result = _decompress_gt_traj(result)
