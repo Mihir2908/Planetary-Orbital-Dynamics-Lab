@@ -219,6 +219,9 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
   const [warmingUp,         setWarmingUp]          = useState(false);
   const warmingRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const trajPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // HZ bounds captured from params at batch-request time — NOT from slider state at click time.
+  // This ensures cell clicks always show the HZ of the system that produced the batch.
+  const batchHzRef = useRef<{ a_inner_au: number; a_outer_au: number } | null>(null);
   const [trajResultByEngine, setTrajResultByEngine] = useState<Record<string, TrajResult | null>>({
     gt_leapfrog: null,
     hnn_hinge4:  null,
@@ -439,6 +442,16 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     setSelectedCell(null);
     setSelectedCellFrames(null);
     setPreviewCellFrames(null, null);
+    // Capture HZ from the params being sent in this request.
+    // Must happen before the await so we record what the batch was actually run with.
+    {
+      const rs_m = params.rs_solar * 6.957e8;
+      const L = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
+      batchHzRef.current = {
+        a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
+        a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
+      };
+    }
     let asyncJobStarted = false;
     try {
       const res = await fetch(`${AGENT_DIRECT}/trajectory/preview`, {
@@ -607,12 +620,12 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     const M_EARTH_MSUN = 3.003e-6;
     const localRhill = params.ap_AU * (1 - params.ep) *
       Math.cbrt(params.mp_earth * M_EARTH_MSUN / (3 * params.ms_solar));
-    const Lrel = params.rs_solar ** 2 * (params.Ts / 5778) ** 4;
+    const batchHz = batchHzRef.current;
     const meta: SimulationMeta = {
       dt:         tSim / Math.max(selectedCellFrames.length - 1, 1),
       t_end:      tSim,
-      a_inner_au: Math.sqrt(Lrel / 1.1),
-      a_outer_au: Math.sqrt(Lrel / 0.5),
+      a_inner_au: batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
+      a_outer_au: batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
       rhill_AU:   localRhill,
     };
     setTrajectoryData(selectedCellFrames, meta);
@@ -714,13 +727,15 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
 
       // Route frames through trajectoryFrames so useOrbitScene drives animation
       // — same mechanism as the non-ML "Run" path (external frameIndex, no internal RAF).
-      const tSim = simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0);
-      const Lrel = params.rs_solar ** 2 * (params.Ts / 5778) ** 4;
+      // Use batchHzRef (captured at batch-request time) not current params — slider state
+      // may have drifted since the batch ran.
+      const tSim   = simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0);
+      const batchHz = batchHzRef.current;
       const meta: SimulationMeta = {
         dt:         tSim / Math.max(frames.length - 1, 1),
         t_end:      tSim,
-        a_inner_au: Math.sqrt(Lrel / 1.1),
-        a_outer_au: Math.sqrt(Lrel / 0.5),
+        a_inner_au: batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
+        a_outer_au: batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
         rhill_AU:   rhillAULocal,
       };
       setTrajectoryData(frames, meta);

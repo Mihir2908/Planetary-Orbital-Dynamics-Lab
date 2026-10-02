@@ -339,26 +339,10 @@ export default function HomePage() {
     moon:   bodyRadiusAU(params.mm_earth, dmCgs),
   };
 
-  // HZ for the orbit canvas.
-  // - Simulation path (no cell preview): trust simMeta directly — the HZ was computed
-  //   by the backend from the actual run parameters, so it is always correct for what
-  //   was simulated.  Do NOT override from slider params here: if the user switches
-  //   sliders to a different system after a run, the HZ should still reflect the
-  //   system that was actually simulated, not the slider state.
-  // - Cell preview path: recompute from current slider params so the HZ matches the
-  //   batch system (cell frames were produced from those params).
-  const hzMeta = React.useMemo(() => {
-    if (!simMeta) return null;
-    if (!previewCellFrames) return simMeta;
-    const rs_m      = params.rs_solar * 6.957e8;
-    const stefboltz = 5.670374419e-8;
-    const F_earth   = 1361.0;
-    const au        = 1.496e11;
-    const L_star    = 4 * Math.PI * rs_m * rs_m * stefboltz * Math.pow(params.Ts, 4);
-    const a_inner   = Math.sqrt(L_star / (4 * Math.PI * 1.1 * F_earth)) / au;
-    const a_outer   = Math.sqrt(L_star / (4 * Math.PI * 0.5 * F_earth)) / au;
-    return { ...simMeta, a_inner_au: a_inner, a_outer_au: a_outer };
-  }, [params.Ts, params.rs_solar, simMeta, previewCellFrames]);
+  // All setTrajectoryData callers bake the correct HZ into simMeta at call time
+  // (simulation path: from backend summary.json; cell click / apply-and-run: from
+  // batchHzRef captured at batch-request time). Never override from current slider params.
+  const hzMeta = simMeta;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // When a chatbot cell query arrives, show those frames in the 3D canvas and mini orbit
