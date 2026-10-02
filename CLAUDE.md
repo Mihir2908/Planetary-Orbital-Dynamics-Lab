@@ -1,8 +1,8 @@
 # Exomoon Orbital Integrator — CLAUDE.md
 
-**Last Updated:** July 14, 2026
-**Status:** Production-stable (core functionality verified, multi-turn queries working; ML stability predictor layer added; extended thinking enabled)
-**Pending Issues:** CSV file retrieval via chatbot UI
+**Last Updated:** September 30, 2026
+**Status:** Production-stable (core functionality verified, multi-turn queries working; two-layer ML system live — MLP Layer 1 + GT Numba / HNN hinge4 Layer 2 on EC2 T4 GPU; extended thinking enabled)
+**Pending Issues:** CSV file retrieval via chatbot UI; S3 inference cache bucket (`exomoon-ml-inference-cache`) not yet created
 
 ---
 
@@ -630,13 +630,80 @@ def export_csv(n_clicks, packed):
 
 ## ML Layer: Moon Stability Predictor
 
-The ML layer is a **purely additive feature** — all existing simulation, EDA, animation, and chat functionality is unchanged. It lives inside the Agent Service process and the `exomoon/ml/` Python package.
+The ML layer is a **purely additive feature** — all existing simulation, EDA, animation, and chat functionality is unchanged. It lives inside the Agent Service process and the `exomoon/ml/` Python package, with GPU compute offloaded to a dedicated EC2 instance.
 
-### Overview: Why ML?
+**The GRU/LSTM is fully retired.** The current production system is a two-layer architecture:
 
-Running the full Numba leapfrog integrator for every (mm_earth, am_hill) candidate in a 50×50 parameter sweep would take hours. The GRU emulator does the same sweep in seconds by learning the physics from pre-generated training data. Accuracy for classification (stable/habitable) is high because orbital dynamics is smooth and the training set covers the full physical parameter space via LHS.
+- **Layer 1** — fast binary classification over a (mm_earth × am_hill) grid via a simulation-level **MLP** (`AuxMLPBinary`). Runs in milliseconds. No trajectories.
+- **Layer 2** — full trajectory preview for eligible cells only, with two selectable physics engines:
+  - **Ground Truth Physics Integrator** — Numba CUDA batch 3-body leapfrog on EC2 T4 GPU. Exact Newtonian physics. ~2.3 s per system at 30×30.
+  - **HNN Physics ML Model (Beta)** — Hill-frame Hamiltonian Neural Network (`HNN_Hill`, `models_hnn_hill_hinge4`). Neural approximation of the moon's equations of motion. ~470 s per system on T4 GPU. Marked BETA; underpredicts on high-Ω/small-rhill systems.
 
-**Why GRU over LSTM**: GRU has ~25% fewer parameters (2 gates + 1 hidden state vs. 3 gates + 2 states), converges faster on smooth dynamical systems, and matches LSTM accuracy for orbital trajectory prediction. `rnn_type="gru"|"lstm"` is a one-word toggle if you want to experiment.
+### Overview: Why This Architecture?
+
+Running the exact 3-body leapfrog for every (mm_earth, am_hill) candidate sequentially would take hours. The two-layer design solves this:
+
+1. **MLP (Layer 1)** sweeps the full grid in milliseconds by classifying at the simulation level — no time-series data needed. It identifies which configurations are likely stable+habitable without running any trajectories. This is the "instant heatmap" the user sees first.
+
+2. **Layer 2** runs full trajectories, but only for the cells that Layer 1 marks as eligible (~30–50% of the grid). Both engine options offload to the EC2 GPU.
+   - **GT Numba** is exact physics. One CUDA thread per grid cell. 2.3 s for 900 cells (30×30). The fastest path; identical results to a single-cell simulation.
+   - **HNN hinge4** approximates forces via a learned Hamiltonian. 470 s for 900 cells on T4 (14–19× slower than CPU HNN, which itself took ~41 min). Beta quality — near-perfect on "easy" mid-HZ systems, undershoots on high-Ω M-dwarf systems.
+
+---
+
+### Why HNN and not GRU/LSTM-based RNNs?
+
+The GRU was the first ML approach tried here — it seemed natural because the simulation produces time-series trajectories, and GRUs are a standard sequence-to-sequence architecture. After extensive development (see "GRU/LSTM: Retired" at the end of this section), it was abandoned. Here is the detailed reasoning for why the GRU fundamentally cannot work for this task, and why the HNN + MLP combination is physically correct.
+
+#### 1. The autoregressive rollout problem
+
+A GRU used as a stability predictor must operate **autoregressively**: it predicts the next state (positions, distances) from the current state, then feeds that prediction back as input for the next step, across hundreds or thousands of steps. This is the core failure mechanism. Any small error in the predicted state at step t feeds into the prediction at step t+1, which then compounds into step t+2, and so on. Over 1000 steps this accumulation is catastrophic — a 1% per-step error in moon–star distance can produce 100% error by the end of the rollout.
+
+This is not a data problem or a training problem — it is a structural property of autoregressive sequence models applied to physics. GRUs are designed for tasks where the ground truth is always fed back (teacher forcing during training), but at inference the model feeds its own outputs back. The distribution mismatch between "training with ground truth" and "inference with predicted states" is the scheduled sampling problem, and multiple scheduled sampling variants were tried (Bernoulli SS, shrinking-prefix SS) with no meaningful improvement or outright regression.
+
+The HNN sidesteps this entirely. It does not predict the next state from the current state. Instead, it learns a scalar **potential energy function** V_θ(position, system_params), and forces are derived analytically as F = −∂V/∂position. The leapfrog integrator then uses those forces, following Newton's second law exactly. The model never predicts a position directly — it predicts forces, and the integrator handles the state evolution. Force prediction errors do not accumulate in the same exponential way because the integrator's symplectic structure bounds the energy drift over long timescales.
+
+#### 2. The timescale asymmetry problem (structural GRU limitation)
+
+The GRU had two regression targets in its dist head: `moon_planet_dist_norm` (moon–planet separation) and `moon_star_dist_norm` (moon–star separation, used for habitability). These two signals operate on very different timescales:
+
+- **Moon–planet distance** varies on the moon's orbital period (days to weeks in physical time, ~10–50 steps in the resampled 1000-step trajectory). The GRU sees this signal repeat frequently and can learn its pattern well.
+- **Moon–star distance** varies on the **planet's orbital period around the star** (months to years, ~50–500 steps). The GRU gets far fewer repeated cycles of this signal per simulation, so its representation of the moon–star distance evolves much more slowly and is learned less reliably.
+
+This structural asymmetry means the GRU's `moon_star_dist_norm` prediction — the one that determines habitability — was systematically less accurate than its `moon_planet_dist_norm` prediction. Even when the moon was genuinely in the habitable zone throughout the simulation, the GRU's autoregressive rollout drifted `moon_star_dist_norm` out of the habitable band within a few hundred steps. This is "trajectory tracking failure" — both the dist head and flag head failed together because the dist head gave the flag head wrong input. The AND criterion (requiring both heads to agree before marking uninhabitable) could not help because both heads agreed on the wrong answer.
+
+The HNN does not have this asymmetry because it does not predict `moon_star_dist` at all. It predicts forces on the moon in the Hill frame, and the moon–star distance emerges naturally from the position trajectory produced by the leapfrog integrator.
+
+#### 3. The classification task does not need a sequence model
+
+For Layer 1 — the binary "is this (mm_earth, am_hill) candidate stable AND habitable?" question — a sequence model is architecturally overkill and mechanistically wrong. The answer to "will this moon stay stable for 10 years?" is largely determined by where the moon starts relative to the Hill sphere and the habitable zone, plus the system parameters that set the dynamical scales. This is a **simulation-level classification** problem, not a sequence modelling problem.
+
+The `AuxMLPBinary` learns from a single aggregated row per simulation (`frac_stable ≥ 0.99` and `frac_habitable ≥ 0.99` as labels) using only the system-level parameter vector. It achieves F1=0.931 on habitability across 10 gate systems because it is answering the right question: "given these system parameters, does the physics produce a stable+habitable orbit?" — not "given these 1000 time steps, what is the next step?". The GRU was answering the second (harder, wrong) question.
+
+#### 4. The inertial-frame force tidal cancellation problem
+
+The first generation of HNN variants operated in the **inertial frame** — predicting forces on the moon directly from its inertial-frame position. This also failed catastrophically, for a different reason.
+
+In the inertial frame, the star applies approximately 230–240 AU/yr² to both the planet and the moon (similar magnitudes, because both are orbiting the same star at similar distances). The **tidal force** governing the moon's orbit around the planet is the *difference* of these two large forces: approximately 2 AU/yr². So a 5% error in the star's predicted force on the planet, or on the moon, produces ~500% error in the tidal force — even though the individual force predictions are 95% accurate. This is the "tidal cancellation" problem: large terms cancel to give a small result, and small errors in the large terms completely dominate the result.
+
+The Hill-frame HNN solves this by transforming into the co-rotating frame centred on the planet. In this frame, the star's gravity appears as a direct tidal term in the effective potential (proportional to Ω²×|q_h|²), not as a difference of two large forces. The HNN predicts the tidal acceleration directly — no subtraction. A 5% error in predicted force is now a 5% error in the relevant dynamical quantity, not a 500% error.
+
+This is why `hnn_model_hill.py` replaced `hnn_model.py`, and why the Hill-frame training (`hnn_dataset_hill.py`) and inference (`hnn_inference_hill.py`) are the only ones used in production.
+
+#### 5. Why not LSTM instead of GRU?
+
+LSTM was considered but not extensively tested as a replacement for GRU. The failure modes above (autoregressive error accumulation, timescale asymmetry, wrong problem framing) are architectural — they apply equally to LSTM. LSTM has slightly more parameters (3 gates vs. 2) and trains slower but does not resolve any of the fundamental issues. Once it became clear the GRU's problem was structural and not a capacity issue, switching to LSTM was deprioritised.
+
+#### Summary table
+
+| Architecture | Classification role | Trajectory role | Production? |
+|---|---|---|---|
+| GRU/LSTM (`MoonRNN`) | Autoregressive rollout + dual head | Same | **Retired** — autoregressive accumulation, timescale asymmetry |
+| `AuxMLPBinary` | Sim-level binary classification, no rollout | N/A | **Layer 1 production** — F1=0.931 |
+| HNN hinge4 Hill-frame | N/A | Hill-frame leapfrog, learned forces | **Layer 2 BETA** — near-perfect on easy systems, underpredicts high-Ω |
+| GT Numba CUDA leapfrog | N/A | Exact Newtonian physics | **Layer 2 production** — 2.3 s, exact, no approximation |
+
+---
 
 ### Training Data: `run_ml_dataset.py`
 
@@ -644,285 +711,380 @@ Running the full Numba leapfrog integrator for every (mm_earth, am_hill) candida
 python run_ml_dataset.py --n_samples 3000 --n_workers 6 --t_sim_max 20 --out ml_dataset.parquet
 ```
 
-**What it does**: Latin Hypercube Sampling (LHS) over all physical parameters simultaneously. With N=3,000, each continuous parameter's range is divided into exactly 3,000 equal-probability bins and exactly one sample is drawn per bin — guaranteeing that no two simulations share the same bin along any parameter axis, and that the full physical range of every parameter is covered uniformly with no clustering or gaps. This produces 3,000 independent simulations, each at a unique point in the 10-dimensional continuous parameter space, yielding ~3M timestep rows in the Parquet output (~1,000 resampled steps per simulation). `moon_retrograde` is handled separately as an independent Bernoulli(0.5) draw (it is binary, not continuous, so it sits outside the LHS engine). N=3,000 was chosen as the practical minimum for the GRU to generalise across the full parameter space — the marginal distribution of each parameter is guaranteed near-uniform by construction, and pair-wise coverage is statistically well-distributed. Expanding to N=10,000 would improve edge-case coverage (particularly for the adaptive `mm_earth` upper bound corner cases) but is not required for a first trained model.
+**What it does**: Latin Hypercube Sampling (LHS) over all physical parameters simultaneously. With N=3,000, each continuous parameter's range is divided into exactly 3,000 equal-probability bins and exactly one sample is drawn per bin — guaranteeing no two simulations share the same bin along any parameter axis, and that the full physical range of every parameter is covered uniformly with no clustering or gaps. `moon_retrograde` is a separate independent Bernoulli(0.5) draw (binary, so outside the LHS engine). Each simulation trajectory is **resampled to a fixed 1000-step grid** before writing to Parquet.
 
-**Why pure LHS, not NASA exoplanet archive data**: The NASA Exoplanet Archive contains ~6,300 confirmed systems, but the dataset carries a severe observational selection bias — it is overwhelmingly dominated by hot Jupiters (large planets on short-period orbits detectable by transit depth), close-in planets around bright stars accessible to radial-velocity follow-up, and high signal-to-noise systems that cleared detection thresholds. Earth-like planets in the habitable zone are drastically underrepresented because they are far harder to detect. Training on archive star-planet parameters would teach the GRU a distribution of systems that looks nothing like the physical parameter space this simulator is designed to explore (e.g. `ap_AU` 0.2–3.5, `mp_earth` 0.5–300 on a log scale) — the model would become overconfident for hot-Jupiter-like configs and unreliable for the Earth-analogue systems the tool is actually built to reason about. Beyond the planet/star distribution bias: **no confirmed exomoons have been discovered**, so there is no external moon stability dataset of any kind — there are literally zero real (`mm_earth`, `am_hill`, stability outcome) labels to train on regardless of how many star-planet systems are in the archive. The only source of ground-truth stability labels available is the Numba leapfrog integrator itself, making synthetic LHS-generated data the only valid training source. Validation uses a 20% held-out LHS split, split by `sim_id` (not by timestep row) to prevent sequence-level data leakage between train and validation sets.
+**Why pure LHS, not NASA exoplanet archive**: No confirmed exomoons have been discovered — there are literally zero real (`mm_earth`, `am_hill`, stability outcome) labels available. The Numba leapfrog integrator is the only source of ground-truth labels. NASA archive data also carries severe observational selection bias (dominated by hot Jupiters, close-in RV detections) that would cause the model to overfit to systems this tool is not designed for.
 
-**Parameter sampling ranges**:
+**Parameter sampling ranges** (updated to cover M-dwarf/K-type regime):
 
 | Param | Min | Max | Scale | Notes |
 |-------|-----|-----|-------|-------|
-| `ms_solar` | 0.08 | 2.0 | linear | M-dwarf through A star; lower bound covers K-1229b host |
+| `ms_solar` | 0.08 | 2.0 | linear | M-dwarf through A star; covers K-1229b host star |
 | `rs_solar` | 0.08 | 2.0 | linear | |
-| `Ts` | 2500 | 12000 | linear | K; lower bound covers cool M-dwarfs |
+| `Ts` | 2500 | 12000 | linear | K; covers cool M-dwarfs |
 | `mp_earth` | 0.5 | 300 | log | Super-Earth through sub-Jupiter |
 | `ap_AU` | 0.01 | 3.5 | linear | Covers close-in HZs of cool stars (K-1229b ap≈0.30 AU) |
 | `ep` | 0.0 | 0.35 | linear | |
-| `mm_earth` | 0.107 | `min(mp_earth, 3.0)` | log | Min = Mars mass; max = planet mass or 3 M_earth, whichever is smaller. Matches inference.py mm_grid upper bound exactly. |
-| `am_hill` | Roche-limit per-sim (≈0.009–0.02) | 1.00 | linear | Lower bound = Roche limit fraction of rhill_AU computed per simulation; upper bound 1.0. The `am_AU > 0.95 × rhill_AU` degeneracy filter was removed — am_hill goes to 1.0 and am_AU = am_hill × rhill ≤ rhill by construction. |
-| `em` | 0.0 | 0.25 | linear | Moon orbit eccentricity |
+| `mm_earth` | 0.107 | `min(mp_earth, 3.0)` | log | Min = Mars mass; max = planet mass or 3 M⊕ |
+| `am_hill` | Roche-limit per-sim (≈0.009–0.02) | 1.00 | linear | |
+| `em` | 0.0 | 0.25 | linear | |
 | `moon_retrograde` | 0 | 1 | Bernoulli(0.5) | |
 | `t_sim` | 1 | 20 | log | Simulated years |
 
-Each simulation trajectory is **resampled to a fixed 1000-step grid** (uniformly in time from t=0 to t=t_sim) before being written to Parquet. This ensures all training sequences have identical length for batched GRU training.
-
-Runs where `rhill_AU < 1e-4` are skipped as degenerate. `am_AU > rhill_AU` cannot occur by construction since `am_AU = am_hill × rhill_AU` and `am_hill ≤ 1.0`.
-
-**Output**: `ml_dataset.parquet` — one row per timestep, ~1000 rows per simulation, ~3M rows for N=3000.
+**Output**: `ml_dataset.parquet` — one row per timestep, ~1000 rows per simulation, ~3M rows for N=3000. Also used as training data for the HNN (`ml_dataset_hill.py` filters it to only stable+habitable rows).
 
 ---
 
-### `exomoon/ml/dataset.py`
+### Layer 1 — Classification: `AuxMLPBinary`
 
-Loads the Parquet file, fits `sklearn.StandardScaler` normalizers on the training split, and provides PyTorch `Dataset` instances.
+**File**: `src/eval_aux_mlp.py`  
+**Weights**: `src/eval_aux_mlp_output/binary/aux_mlp_binary.pt`
 
-**Feature vectors**:
+A 3-layer MLP that classifies each (mm_earth, am_hill) candidate as stable+habitable or not, operating on **simulation-level aggregate features** — no time-series, no trajectories, no autoregressive rollout. Inference over a 30×30 grid takes milliseconds on CPU.
 
-| Vector | Columns |
-|--------|---------|
-| `SYS_COLS` (14) | `ms_solar, rs_solar, Ts, mp_earth, ap_AU, ep, mm_earth, am_hill, em, moon_retrograde, t_sim, rhill_AU, a_inner_au, a_outer_au` |
-| `STATE_COLS` (7) | `moon_planet_dist_norm` (mpd/rhill — stable ⟺ ≤1.0), `moon_star_dist_norm` (arcsinh HZ-band position — habitable ⟺ in [0, 0.881]), `moon_temp_norm` (arcsinh equilibrium temperature, second independent HZ encoding), `planet_star_dist` (raw AU), `moon_speed`, `planet_speed`, `t_frac`. **`stable` and `habitable` are deliberately excluded** — they are TARGET_FLAG_COLS only and never fed back as inputs, preventing binary-flag autoregressive lock-in. |
-| `TARGET_DIST_COLS` (6 — MSE head) | Next-step: `moon_planet_dist_norm`, `moon_star_dist_norm`, `moon_temp_norm`, `planet_star_dist`, `moon_speed`, `planet_speed` |
-| `TARGET_FLAG_COLS` (3 — BCE head) | Next-step: `stable`, `habitable`, `habitable_from_temp` |
+**Why simulation-level, not sequence-level**: The GRU operated on per-timestep sequences (~1000 steps) and required autoregressive rollout at inference, which accumulated errors and produced inconsistent results (especially on retrograde and M-dwarf systems). The MLP instead learns from a single aggregated row per simulation — `frac_stable ≥ 0.99` and `frac_habitable ≥ 0.99` as binary labels. This completely bypasses autoregressive instability.
 
-`make_splits(path, val_frac=0.20, seed=42)` splits **by sim_id** (not by row) so no information leaks between train and val sequences.
+**Feature columns** (input to MLP):
 
-`save_normalizer` / `load_normalizer` pickle the `(sys_scaler, state_scaler)` tuple to `models/normalizer.pkl`.
+```
+SYS_COLS (14): ms_solar, rs_solar, Ts, mp_earth, ap_AU, ep,
+               mm_earth, am_hill, em, moon_retrograde,
+               t_sim, rhill_AU, a_inner_au, a_outer_au
+```
+
+Plus `mm_earth`, `am_hill`, `em`, `moon_retrograde` are included directly — the MLP sees the full simulation-level parameter set. `LOG_SYS_COLS` (indices 3, 6, 10, 11 = `mp_earth`, `mm_earth`, `ap_AU`, `rhill_AU`) are log-transformed before `StandardScaler` normalization.
+
+**Architecture**: 3-layer feedforward MLP, `BCEWithLogitsLoss`, two output heads (`stable_logit`, `hab_logit`), `pos_weight = n_neg/n_pos` per head (dynamic, computed from training split), `label_thresh=0.99` for label binarization.
+
+**MLP eligibility at inference**: A cell is `eligible` when both `sigmoid(stable_logit) > 0.5` AND `sigmoid(hab_logit) > 0.5`. The `eligible_mask` (N,) bool array is passed to both Layer 2 engines — ineligible cells are frozen at their initial state and never integrated.
+
+**Performance** (10-gate evaluation: K-452b-v2, K-1229b, TRAPPIST-1e, Kepler-442b, OGLE-390Lb — each prograde and retrograde):
+
+| Metric | Value |
+|--------|-------|
+| Habitable F1 | **0.931** (average across non-OGLE gates) |
+| Stable F1 | **0.922** |
+| OGLE false-positive test | 0/900 false positives (gt_habitable=0 everywhere for OGLE as expected) |
+
+MLP F1=0.931 outperforms the retired GRU across all retrograde systems (GRU stable recall was 0.212/0.367 on TRAPPIST-1e retrograde, habitable recall 0.000).
+
+MLP eligible fraction by system: K-1229b ~51% (460/900 cells), typical mid-HZ systems ~50–55%.
 
 ---
 
-### `exomoon/ml/model.py`
+### Layer 2 — Trajectory Preview: GT Physics Integrator
 
+**File**: `src/exomoon/ml/batch_leapfrog_numba_cuda.py`  
+**Function**: `batch_leapfrog_numba_cuda_trajectories()`  
+**Endpoint on EC2**: `POST /gt/predict_numba` at `http://<GPU_IP>:8001`
+
+Exact 3-body Newtonian KDK leapfrog — identical physics to the main single-simulation integrator (`integrator.py`) — but parallelised across all N grid cells via a **Numba CUDA `@cuda.jit` kernel**, one CUDA thread per cell. Zero Python iterations during the integration loop.
+
+**Why Numba is possible for GT but not HNN**: GT leapfrog forces are pure arithmetic (Newton's law) — fully expressible in a `@cuda.jit` kernel with no external dependencies. HNN leapfrog forces require `torch.autograd.grad(V_θ, q_h_norm)` per step — PyTorch autograd cannot be called from a Numba CUDA kernel. So GT gets 84× speedup via Numba; HNN runs as a regular PyTorch CUDA matmul batch.
+
+**Timestep**: `dt = min(T_moon_ref/100, 1/20000)` from the median cell — same formula as the single-cell integrator.
+
+**Outputs**: Per-cell `map_stable` / `map_habitable` / `map_both` + full trajectory arrays `(N, n_out, 3)` for star, planet, moon positions. Trajectory arrays are stored at evenly-spaced stride intervals across `n_out=5000` frames.
+
+**Performance** (30×30 grid = 900 cells, t_sim=10yr, EC2 T4 GPU):
+
+| System | Numba GT | Non-Numba GT | Speedup |
+|--------|----------|--------------|---------|
+| K-1229b | **2.3 s** | 193 s | **84×** |
+| K-442b | **2.3 s** | 193 s | **84×** |
+| K-452b-v2 | **2.3 s** | 193 s | **84×** |
+| TRAPPIST-1e | **3.0 s** | 250 s | **83×** |
+
+Stable recalls within ±0.002 of non-Numba GT across all systems. The Numba BL is now the fastest physics-based inference path — faster than HNN hinge4 (~470 s) by ~200×. No S3 caching needed (fast enough to recompute on every request).
+
+**Stopping criterion** (per-cell): cell stops when `moon_planet_dist > escape_factor × rhill_AU` **AND** `moon_star_dist < a_inner OR > a_outer` simultaneously. Escaped-but-still-habitable moons continue running until uninhabitability is also confirmed — this is a hard constraint, never remove it.
+
+---
+
+### Layer 2 — Trajectory Preview: HNN Physics ML Model (Beta)
+
+**Files**: `src/exomoon/ml/hnn_model_hill.py`, `src/exomoon/ml/hnn_inference_hill.py`  
+**Production weights**: `src/models_hnn_hill_hinge4/` — **NEVER overwrite**  
+**Endpoint on EC2**: `POST /hnn/predict` at `http://<GPU_IP>:8001`
+
+A Hamiltonian Neural Network operating in the **co-rotating Hill frame** centred on the planet. Learns a scalar potential V_θ(q_h_norm, sys_enc); moon forces are derived as F = −∂V_θ/∂q_h_norm via autograd. Coriolis force is added analytically at each integration step (velocity-dependent, not learnable from a potential); centrifugal force is encoded into V_θ through training targets.
+
+**Why Hill frame (and why inertial frame fails)**: In the inertial frame, the star applies ~230–240 AU/yr² to both planet and moon. The tidal force governing moon dynamics is their difference (~2 AU/yr²). Any ~5% differential error in predicted star forces produces ~665% tidal error → catastrophic moon ejection. In the Hill frame, the star's gravity appears directly as a tidal term in the effective potential — no large-number subtraction — making force prediction stable.
+
+**Architecture** (`HNN_Hill`, `hnn_model_hill.py`):
+- Input: `q_h_norm` (3D Hill-frame position normalised by rhill_AU) + `sys_enc` (6D log-standardised system params)
+- `sys_enc` columns: `[ms_solar, mp_earth, mm_earth, ap_AU, rhill_AU, Omega_yr]` — all log-transformed then StandardScaler-normalised
+- Hidden: 256 neurons × 3 layers, Tanh activations (feedforward)
+- Output: scalar V_θ (dimensionless, normalised by V_ref = G·ms·mp/ap)
+- Forces via `torch.autograd.grad(V_θ, q_h_norm)`, negated: F_cons_h = −∂V_θ/∂q_h_norm
+
+**Training loss** (hinge loss):
+
+```
+L = L_mag + 50 × L_sign
+
+L_mag  = MSE(|F_pred|, |F_label|)          # force magnitude
+L_sign = mean(ReLU(−dot(F_pred, F_label)))  # penalise direction reversal
+```
+
+Force labels are analytically computed from stored positions using Newton's law — NOT finite differences. The 50× sign weight directly targets gradient inversions that cause exponential escape.
+
+**Training filter**: only rows where NOT (stable=0 AND habitable=0) are included. This removes deep-escaped rows where `moon_planet_dist` diverges to ~10⁶ AU (causing catastrophic MSRE loss). Escaped-but-habitable rows (stable=0, habitable=1) are **included** — the HNN must learn the transition zone. This filter is applied in `hnn_dataset_hill.py`.
+
+**Inference** (`hnn_inference_hill.py`):
+- Integrates all N cells in a single batched KDK leapfrog using Hill-frame forces
+- Each cell gets its own Hill frame (x_hat, y_hat, z_hat, Ω) computed from the cell's current star–planet vector — vectorised, no Python loop over cells
+- `dt = min(T_moon_ref/100, 1/20000)` from median cell (same as GT)
+- `n_phys = max(ceil(t_sim / dt), n_steps)` — dt determines actual step count, n_steps is a floor
+- Same per-cell stopping criterion as GT: BOTH unstable AND uninhabitable simultaneously
+- `eligible_mask` (from MLP) ANDed into outputs — ineligible cells frozen at t=0
+
+**Performance** (30×30 grid = 900 cells, physics dt, MLP eligible_mask, EC2 T4 GPU):
+
+| System | GT fraction (stable) | HNN fraction (stable) | GT fraction (hab) | HNN fraction (hab) |
+|--------|---------------------|----------------------|-------------------|-------------------|
+| K-452b-v2 prograde | 0.528 | 0.488 | 1.000 | 0.467 |
+| K-442b prograde | 0.438 | 0.287 | 0.866 | 0.464 |
+| K-1229b prograde | 0.508 | 0.149 | 0.961 | 0.433 |
+| TRAPPIST-1e prograde | 0.182 | 0.000 | 0.594 | 0.001 |
+
+**Recall** (correct stable AND habitable / gt stable AND habitable):
+
+| System | GT_hab | HNN_hab_rec | Notes |
+|--------|--------|-------------|-------|
+| K-452b-v2 prograde | 1.000 | 0.821 | Best case — clear mid-HZ system |
+| K-442b prograde | 0.866 | 0.576 | Moderate |
+| K-1229b prograde | 0.961 | 0.294 | Hard M-dwarf edge-of-HZ system |
+| TRAPPIST-1e prograde | 0.594 | 0.000 | Too compact/high-Ω — HNN always escapes |
+
+**Root cause of HNN failures**: The hinge loss enforces correct gradient direction only at training **snapshots** individually. No constraint on V's global shape **between** snapshots. In high-Ω (small-rhill, fast-orbit) regions, the interpolated gradient direction can invert → repulsive force → exponential moon escape. Two failure modes:
+- **Mode A (drift)**: slowly growing mpd error over 10 years. K-1229b, heavy-moon cells.
+- **Mode B (snap-escape)**: moon sent to 1–4 AU within the first year. TRAPPIST-1e extreme cells.
+
+**HNN is marked BETA** and presented as a "fast estimate" in the UI, not a physics substitute.
+
+#### HNN Development History (hinge1–hinge8 lineage)
+
+All Hill-frame HNNs: 256×3 feedforward, Tanh, L_mag + 50×L_sign loss, V via autograd. Models trained on `ml_dataset.parquet` unless noted.
+
+| Model | Warm-start | lr | Best val_loss | Status |
+|-------|-----------|-----|--------------|--------|
+| `models_hnn_hill` (baseline) | None | ~1e-3 | ~0.8+ | SUPERSEDED — no sign loss, zero-target blowup |
+| `models_hnn_hill_sign` | None | ~1e-3 | FAILED | FAILED — sign(0)=1 in PyTorch blew up z-targets |
+| `models_hnn_hill_hinge` (hinge1) | None | 1e-3 | ~0.7–0.8 | SUPERSEDED — first working hinge, no systematic eval |
+| `models_hnn_hill_hinge2` | hinge1 | 1e-4 | 0.41507 | SUPERSEDED |
+| `models_hnn_hill_hinge3` | hinge2 | 2.5e-5 | 0.35566 | SUPERSEDED |
+| **`models_hnn_hill_hinge4`** | hinge3 | 1e-5 (→6.25e-7) | **0.34959** | **PRODUCTION — NEVER OVERWRITE** |
+| `models_hnn_hill_hinge5_fresh` | None | 5e-4 | 0.63319 | ABANDONED — combined dataset, high loss |
+| `models_hnn_hill_hinge6` | hinge5 | 1e-4 | 0.30354 | ABANDONED — lower val_loss, never gate-evaluated |
+| `models_hnn_hill_hinge7` | hinge6 | 2.5e-5 | 0.25163 | **CATASTROPHICALLY FAILED** — gate eval worse than hinge4 |
+| `models_hnn_hill_hinge8_rollout_v2` | hinge4 | 1e-5 | 0.34566 | **FAILED** — parquet-dt rollout doesn't generalise to physics-dt inference |
+| `models_hnn_hill_rollout_v3` | hinge4 | 1e-5 | 0.33972 | **FAILED gate eval** — improved=0, regressed=4 vs hinge4 |
+| `models_hnn_hill_hinge8_mono` | hinge4 | 1e-5 | 0.34951 | **FAILED** — gradient monotonicity penalty never fired (mono_loss≈0 every epoch); Path 1 exhausted |
+
+**Critical lessons from the lineage**:
+1. val_loss does NOT predict trajectory performance. hinge7 (val=0.252) is catastrophically worse than hinge4 (val=0.350) in actual eval.
+2. Training on `ml_dataset_combined.parquet` (hinge5–7) causes catastrophic forgetting of single-dataset patterns. Never use combined dataset again.
+3. BPTT rollout at parquet-dt (0.01yr) does not generalise to physics-dt (5e-5yr) inference. Rollout must be at physics-dt.
+4. JIT scripting gave only 1.09× speedup — BLAS matmuls (N=2500 cells × 256-hidden MLP) dominate, not Python overhead. GPU is the only viable speedup path.
+5. hinge4 loss surface is flat at epochs 40–50 (train 0.236, val 0.350 ± 0.001). Standard SGD cannot escape this basin. Path 1 (gradient monotonicity), Path 2 (rollout at parquet dt), Path 3 (rollout at physics dt) all exhausted. **hinge4 is the final production model.**
+
+---
+
+### EC2 GPU Infrastructure
+
+HNN and GT Numba batch inference runs on a dedicated EC2 g4dn.xlarge instance (NVIDIA Tesla T4, 16 GB VRAM, eu-west-2). This is a **spot instance** — it may stop after ~6h of idle. To re-launch, re-run the spot request (security group, IAM profile, ECR image, and AMI all persist).
+
+**Key files**:
+- `gpu.Dockerfile` — Docker image: `pytorch/pytorch:2.5.1-cuda12.4` base + `requirements_gpu.txt` + `src/`
+- `src/hnn_gpu_service.py` — FastAPI on port 8001, two routes:
+  - `POST /hnn/predict` — HNN hinge4 batch inference (`batch_hnn_hill_trajectories`)
+  - `POST /gt/predict_numba` — Numba CUDA batch leapfrog (`batch_leapfrog_numba_cuda_trajectories`)
+  - `GET /health` — returns `{"ok": true, "cuda_available": true, "gpu_name": "Tesla T4"}`
+- `ecr_push_gpu.sh` — build + push to ECR `exomoon-hnn-gpu`
+- `launch_ec2_gpu.sh` — launch g4dn.xlarge spot instance
+
+**AWS resources** (additive — never touch existing ECS/NLB/App Runner/Step Functions infra):
+- ECR repo: `exomoon-hnn-gpu`
+- Security group: `exomoon-hnn-gpu-sg` (port 8001 open, port 22 restricted to developer IP)
+- IAM instance profile: `ec2-ecr-access-role` (AmazonEC2ContainerRegistryReadOnly)
+- Key pair: `exomoon-hnn-gpu-key` at `C:\Users\mihir\.aws\exomoon-hnn-gpu-key.pem`
+
+**Current GPU IP**: `52.56.252.104` (spot — check `GPU_SERVICE_URL` env or `agent_service.py` line ~126 for the live IP; memory file `ec2_gpu_setup_state.md` may have a stale IP from original launch).
+
+**Agent service connection** (`agent_service.py`):
+- `GPU_SERVICE_URL` — env var with default `http://16.60.135.10:8001` (update to current spot IP)
+- `GPU_SERVICE_TIMEOUT_S = 1200` — 20 min timeout (covers HNN 470s + transfer + margin)
+- `_forward_to_gpu(req)` — forwards `POST /trajectory/preview` requests to the EC2 service with n_steps=5000
+
+---
+
+### S3 Inference Cache
+
+**File**: implemented in `agent_service.py`  
+**Bucket**: `exomoon-ml-inference-cache` (separate from `nbody-time-series-storage`)  
+**Status**: Architecture implemented, S3 bucket creation pending.
+
+The HNN hinge4 path takes ~470 s per system. Popular systems (K-442b, K-452b, etc.) requested repeatedly would re-run the same inference unnecessarily. The S3 cache stores completed inference results keyed by a hash of all inputs.
+
+Cache only applies to HNN hinge4 (mode=`"hnn_hinge4"`). GT Numba runs in 2.3 s — too fast to need caching; it recomputes on every request.
+
+**Cache key** (SHA-256 of canonical JSON):
 ```python
-class MoonRNN(nn.Module):
-    def __init__(self, system_dim=14, state_dim=7, hidden=256, layers=2,
-                 rnn_type="gru", dropout=0.0):
-        # nn.GRU or nn.LSTM selected by rnn_type
-        # Input at each step: state (7) concat system params (14) = 21-dim
-        # head_dist: Linear(hidden, 6) → relu → predicted distances/speeds + moon_temp_norm (MSE loss)
-        # head_flags: Linear(hidden, 3) → raw logits for stable, habitable, habitable_from_temp (BCE loss)
-        # stable/habitable are NOT in STATE_COLS — targets only, never fed back as inputs
+key_dict = {
+    "params": {k: round(float(v), 6) for k, v in system_params.items()},
+    "t_sim": round(t_sim, 4), "moon_retrograde": bool(moon_retrograde),
+    "em": round(em, 6), "mm_res": mm_resolution, "am_res": am_resolution,
+    "escape_factor": round(escape_factor, 4),
+    "mode": "hnn_hinge4", "model_version": "hinge4_v1",
+}
+key = hashlib.sha256(json.dumps(key_dict, sort_keys=True).encode()).hexdigest()[:16]
 ```
+S3 key: `ml_inference_cache/hnn_hinge4/{key}.json`
 
-**Key methods**:
-- `forward(state_seq, sys_params)` → `(dist_pred, flag_logits)` — sys_params are broadcast and concatenated to state at every step; `dist_pred` is shape `(batch, seq, 6)`, `flag_logits` is `(batch, seq, 3)`
-- `compute_loss(dist_pred, flag_logits, targets)` — MSE on 6 dist/speed targets + BCEWithLogitsLoss on each of 3 flag targets (stable, habitable, habitable_from_temp), with 7× pos_weight on the two habitable targets
-- `save(out_dir)` — writes `gru_model.pt` (state dict) + `model_config.json`
-- `MoonRNN.load(out_dir)` — reads `model_config.json` first to reconstruct exact architecture, then loads weights
-
-`model_config.json` schema: `{"rnn_type", "hidden", "layers", "system_dim", "state_dim"}` — required so inference always reconstructs the correct architecture regardless of which hyperparams were used at training time. Current trained models use `system_dim=14, state_dim=7`.
+Cache write runs in a background thread (never delays response). 90-day S3 lifecycle expiry rule. `model_version` bump invalidates old cache entries after weight updates.
 
 ---
 
-### `exomoon/ml/train.py`
+### Inference Flow (End-to-End, Layer 1 + Layer 2)
 
-```bash
-python -m exomoon.ml.train \
-    --data ml_dataset.parquet \
-    --epochs 30 --batch 64 --lr 1e-3 \
-    --hidden 256 --layers 2 --rnn_type gru \
-    --out models/
+```
+User triggers "Run Trajectory Preview" in ML panel (Next.js)
+         │
+         ▼ POST /trajectory/preview (agent_service.py)
+┌─────────────────────────────────────────────────────────────────────┐
+│ _predict_stability_map_mlp()                                         │
+│ • Build mm_grid (log-spaced, 0.107–min(mp×1.0, 3.0) M⊕)           │
+│   and am_grid (linear, Roche limit → 1.0 Hill radii)               │
+│ • For each of N×N cells: initial_state(SystemParams(...))           │
+│ • Feature matrix (N, 14): SYS_COLS + log-transform + StandardScaler │
+│ • Forward pass: AuxMLPBinary → (stable_logit, hab_logit) per cell  │
+│ • eligible_mask: sigmoid(stable) > 0.5 AND sigmoid(hab) > 0.5      │
+│ • Build map_stable, map_habitable, map_both (classification only)   │
+│ ⏱️ ~milliseconds on CPU                                             │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │ eligible_mask + system params → Layer 2
+                       │
+                       ▼ S3 cache check (HNN mode only)
+                       │ HIT → return cached JSON, skip EC2 call
+                       │ MISS → forward to GPU
+                       ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ _forward_to_gpu(req) → POST http://<GPU_IP>:8001/hnn/predict        │
+│              OR → POST http://<GPU_IP>:8001/gt/predict_numba        │
+│                                                                      │
+│ On EC2 T4 GPU:                                                       │
+│ • Only eligible cells run to completion (ineligible frozen at t=0)  │
+│ • Per-cell KDK leapfrog with Hill-frame HNN forces (HNN mode)       │
+│   OR Numba CUDA 3-body leapfrog (GT mode)                           │
+│ • Per-cell stopping: BOTH unstable AND uninhabitable simultaneously  │
+│ • n_steps=5000, t_sim from request, escape_factor=1.0               │
+│ • Outputs: map_stable/habitable/both + trajectory arrays (N,5000,3) │
+│ ⏱️ HNN: ~470s | GT Numba: ~2.3s                                     │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │ JSON response → agent_service.py
+                       │ Large array transferred EC2 → agent (60–130s)
+                       ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ RAM cache: store full trajectory arrays keyed by _inference_cache_key│
+│ S3 write (background thread, HNN mode only)                          │
+│ Response: map_both, mm_grid, am_grid, valid_mm_range,               │
+│           valid_am_per_mm → Next.js MlMapOverlay                    │
+└─────────────────────────────────────────────────────────────────────┘
+                       │
+                       ▼ User clicks a cell on the heatmap
+┌─────────────────────────────────────────────────────────────────────┐
+│ POST /trajectory/cell_preview  (cell_idx, mm_idx, am_idx)           │
+│ → read from RAM cache (no EC2 call)                                  │
+│ → _traj_to_frames(): compute 3D mpd, msd; build frame list          │
+│ → stream frames → setPreviewCellFrames(frames) in Zustand store     │
+│ → main orbit canvas + MiniOrbitView animate the cell trajectory     │
+│ ⏱️ ~instant (RAM read only)                                         │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Saves to `out/`**:
-- `gru_model.pt` — best model weights (lowest val_loss)
-- `model_config.json` — architecture config
-- `normalizer.pkl` — `(sys_scaler, state_scaler)` tuple
-- `training_history.json` — loss curves per epoch
-- `train_status.json` — live progress (updated each epoch, polled by `/ml/train/status`)
-
-`train_status.json` schema (updated live):
-```json
-{
-  "status": "running",
-  "epoch": 12,
-  "total_epochs": 30,
-  "train_loss": 0.0423,
-  "val_loss": 0.0381,
-  "flag_acc": 0.947,
-  "elapsed_s": 142.3
-}
-```
-
-`training_history.json` schema (written on completion):
-```json
-{
-  "train_loss": [...],
-  "val_loss": [...],
-  "flag_accuracy": [...],
-  "dist_mae": [...],
-  "epochs": 30,
-  "hyperparams": {"rnn_type": "gru", "hidden": 256, ...}
-}
-```
+**Z-axis flag** (`MiniOrbitView.tsx`): HNN operates in a full 3D Hill frame with real Z dynamics. When `moon_planet_dist` (3D) exceeds rhill while the 2D XY projection still looks stable, an amber "Z-axis moon escaped" badge fires. Similarly for Z-axis uninhabitability (3D moon–star distance outside HZ while 2D projection is in HZ). Non-ML single-cell simulations always have Z=0 — this flag never fires for them.
 
 ---
 
-### `exomoon/ml/inference.py`
+### API Endpoints (ML + Trajectory Preview)
 
-```python
-def predict_stability_map(
-    system_params: dict,    # ms_solar, rs_solar, Ts, mp_earth, ap_AU, ep
-    t_sim: float,
-    moon_retrograde: bool = False,
-    em: float = 0.0,
-    mm_resolution: int = 50,
-    am_resolution: int = 50,
-    model_dir: str = "models/",
-    n_steps: int = 1000,
-) -> dict
-```
-
-**Algorithm**:
-1. Build `mm_grid` (log-spaced, `0.107 M⊕` → `min(mp_earth×0.30, 0.5) M⊕`) and `am_grid` (linear, Roche-limit fraction → 1.0 Hill radii)
-2. For each of the N×N candidates: call `initial_state(SystemParams(...))` to get t=0 positions/velocities
-3. Normalize via `normalizer.pkl`; run all N×N through model in one batched forward pass
-4. Autoregressive rollout for `n_steps` steps. **Stability**: `stable_logit > 0` from flag head sets `ever_unstable`. **Habitability (AND criterion)**: both `moon_star_dist_norm ∉ [0, ARCSINH_1]` (dist head, `ARCSINH_1 = arcsinh(1.0) ≈ 0.881`) AND `habitable_logit < 0` (flag head) must agree at the same step before the candidate is marked `ever_uninhabited`. This requires both heads to simultaneously signal uninhabitable — a single-head misfire alone cannot disqualify a candidate.
-5. A candidate is "valid" if it remains stable AND habitable at **every** step
-
-**Returns**:
-```python
-{
-  "ok": True,
-  "map_stable":     [[bool, ...], ...],  # [mm_resolution][am_resolution]
-  "map_habitable":  [[bool, ...], ...],
-  "map_both":       [[bool, ...], ...],
-  "mm_grid":        [...],               # M_earth
-  "am_grid":        [...],               # Hill radii
-  "valid_mm_range": [min_mm, max_mm],    # or null if none
-  "valid_am_per_mm": [[min_am, max_am] or null, ...]  # per mm row
-}
-```
-
-If `gru_model.pt` or `normalizer.pkl` is not found, returns `{"ok": False, "error": "no_model", ...}`.
-
----
-
-### ML API Endpoints (on Agent Service, port 8000)
-
-All four endpoints are defined in `agent_service.py`. They bypass the Claude tool loop — called directly from the Next.js frontend.
+All endpoints in `agent_service.py`. ML classification endpoints are called directly from Next.js; trajectory endpoints are called via chat agent tool or Next.js.
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/ml/predict` | POST | Run inference → 2D stability map |
-| `/ml/train` | POST | Start background training thread |
-| `/ml/train/status` | GET | Poll training progress |
-| `/ml/train/history` | GET | Fetch completed training curves |
+| `/ml/predict` | POST | Layer 1 MLP classification map (fast, CPU, no EC2) |
+| `/trajectory/preview` | POST | Layer 1 + Layer 2 batch (MLP mask → GPU) |
+| `/trajectory/cell_preview` | POST | Single-cell trajectory from RAM cache (instant) |
+| `/trajectory/preview/cache/invalidate` | GET | Delete one S3 cache entry by mode+key |
 
-**ML model state** (module-level in `agent_service.py`):
-- `_ml_model` — lazy-loaded on first `/ml/predict` call; `None` until `gru_model.pt` exists; invalidated after training completes so next prediction reloads fresh weights
-- `_ml_model_lock` — threading lock for concurrent predict requests
-- `_train_job` — dict tracking active training thread state
-- `ML_MODEL_DIR` — from `os.getenv("ML_MODEL_DIR", "../../models")` (absolute path resolved at startup)
+**`/ml/predict` body**:
+```json
+{
+  "system_params": {"ms_solar":1.0,"rs_solar":1.0,"Ts":5772,"mp_earth":1.0,"ap_AU":1.0,"ep":0.0},
+  "t_sim": 10.0, "moon_retrograde": false, "em": 0.0,
+  "mm_resolution": 30, "am_resolution": 30
+}
+```
 
----
+**`/trajectory/preview` body**:
+```json
+{
+  "system_params": {...}, "t_sim": 10.0, "moon_retrograde": false,
+  "em": 0.0, "mm_resolution": 30, "am_resolution": 30,
+  "mode": "gt_leapfrog",   // or "hnn_hinge4"
+  "n_steps": 5000          // NEVER reduce below 5000
+}
+```
 
-### Permanent Baseline: `models_temphead` (NEVER OVERWRITE)
+Response (same structure for both): `map_stable`, `map_habitable`, `map_both`, `mm_grid`, `am_grid`, `valid_mm_range`, `valid_am_per_mm` — identical to the old `/ml/predict` GRU response schema, so the Next.js frontend (`MlPrediction` type) is unchanged.
 
-**`src/models_temphead/` is the permanent reference checkpoint.** All files in this directory must never be deleted, overwritten, or used as the `--out` target for any training run. It is the guaranteed fallback for production inference.
-
-**To revert production to baseline**: copy all files from `models_temphead/` to `models/`.
-
-**Inference config that achieves the baseline numbers**: AND criterion + 5% outer-HZ tolerance (`ARCSINH_1_OUTER = arcsinh(1.05) ≈ 0.916`). Both are active in the current `inference.py`.
-
-**Architecture**: `system_dim=14, state_dim=7, hidden=256, layers=2, rnn_type=gru`
-- STATE_COLS: `[moon_planet_dist_norm, moon_star_dist_norm, moon_temp_norm, planet_star_dist, moon_speed, planet_speed, t_frac]` — no binary flags in state
-- `moon_star_dist_norm = arcsinh((moon_star_dist − a_inner) / hz_width)` — arcsinh-encoded HZ position
-- `moon_temp_norm = arcsinh((T_moon − T_cold) / temp_width)` — second independent habitability encoding via Stefan-Boltzmann temperature
-- SYS_COLS (14): includes `a_inner_au`, `a_outer_au` alongside `rhill_AU`
-- TARGET_FLAG_COLS: `[stable, habitable, habitable_from_temp]` (3 BCE heads)
-
-**4-gate acceptance evaluation** (strict metric: `(gt_stable AND gt_habitable AND ml_stable AND ml_habitable) / (gt_stable AND gt_habitable)`):
-
-| Gate | Stable recall | Habitable recall |
-|------|--------------|-----------------|
-| Kepler-452b-v2 prograde | 0.964 | 0.463 |
-| Kepler-452b-v2 retrograde | 0.940 | 0.632 |
-| Kepler-1229b prograde | 0.849 | 0.205 |
-| Kepler-1229b retrograde | 0.950 | 0.602 |
-| **Average habitable recall** | | **0.476** |
-
-**Training provenance**: Trained Jun 22, 2026. Dataset: pre-Stage-C local build — parameter ranges ms/rs 0.4–2.0 solar, Ts 3000–12000 K, ap_AU 0.2–3.5, am_hill fixed 0.05–0.80, mm_earth capped at min(mp×0.30, 0.50 M⊕), pure LHS (no conditional HZ), freeze-post-escape to first out-of-Hill-sphere value. 30 epochs, val_loss=0.208.
-
-**Future model versions** write to `models/` (the live inference target) or a new named directory. The `models_temphead/` directory is never the `--out` target. See `src/models_temphead/BASELINE_LOCKED.md` for full details.
+**Critical constant**: `n_steps = 5000` is hardcoded in `agent_service.py` `_forward_to_gpu()`. This gives ~23–50 frames/orbit for smooth animation. **Never reduce this value** — it was tried and immediately reverted after user objection.
 
 ---
 
-### Current ML Status & Recall Baselines
+### Protected Model Directories (NEVER overwrite, NEVER use as `--out`)
 
-**Critical constraint**: Empirical stability thresholds (prograde ~0.4–0.5 Hill radii, retrograde ~0.93 Hill radii) must **never** be used in training or inference. The model must discover these emergent limits from simulated dynamics. Deterministic closed-form quantities (`rhill_AU`, `a_inner_au`, `a_outer_au`) are permitted inputs.
+| Directory | Description |
+|-----------|-------------|
+| `models_hnn_hill_hinge4/` | **PRODUCTION HNN** — final trajectory model |
+| `eval_aux_mlp_output/binary/` | **PRODUCTION MLP** — `aux_mlp_binary.pt` + normaliser |
+| `models_temphead/` | GRU reference baseline (retired from production) |
+| `models_temphead_ss/` | GRU scheduled sampling variant (retired) |
+| `models_hnn_hill_hinge8_rollout_v2/` | Failed rollout — protected for reference |
+| `models_hnn_hill_rollout_v3/` | Failed rollout — protected for reference |
+| `models_hnn_hill_hinge8_mono/` | Failed gradient monotonicity — protected for reference |
+| `models_hnn_dist_v12/` | Retired inertial-frame HNN v12 (tidal cancellation problem) |
+| `models_force_mlp/` | Force regression MLP (secondary option, not deployed) |
+| `models_hnn_hill_hinge5_fresh/`, `hinge6/`, `hinge7/` | Combined-dataset variants — catastrophically failed |
 
-#### Ground Truth Evaluation Grids
+---
 
-Located in `src/ground_truth_grids/`. Four `.npz` + `.meta.json` file pairs — one per (system × direction):
+### Ground Truth Evaluation Grids
 
-| File prefix | System | Why chosen |
-|---|---|---|
-| `Kepler_452_b_v2_{pro,retro}` | K-452b-v2 | Well-covered, typical mid-HZ system; representative of the bulk training distribution |
-| `Kepler_1229_b_{pro,retro}` | K-1229b | Sparse-regime system: small rhill_AU, planet near its HZ edge (ap=0.3006 AU, outer HZ≈0.309 AU); tests model behaviour at the hardest part of the parameter space |
+Located in `src/ground_truth_grids/`. Six systems, each with `.npz` + `.meta.json` file pairs:
 
-These four cases form the **4-system acceptance gate** — a model change must not regress any of them to be considered an improvement.
+| Prefix | System | Why chosen |
+|--------|--------|------------|
+| `Kepler_452_b_v2_{pro,retro}` | K-452b-v2 | Mid-HZ system, bulk training distribution — "easy" case |
+| `Kepler_1229_b_{pro,retro}` | K-1229b | M-dwarf, small rhill, planet near HZ edge (ap=0.3006 AU, outer HZ≈0.309 AU) — "hard" case |
+| `TRAPPIST_1_e_{pro,retro}` | TRAPPIST-1e | Extremely compact, high-Ω — edge case where HNN always fails |
 
-Metric used: CLEAN-SUBSET habitable recall = correctly predicted stable-AND-habitable / (gt_stable=True AND gt_habitable=True). Requires model to predict both `ml_stable=True` AND `ml_habitable=True`.
+These six (+ OGLE-390Lb as FP-only gate) form the acceptance gate. A model change must not regress any of them. Gate systems are **test-only** — never used as anchors for training data or regularisation targets.
 
-#### Trained Checkpoint Inventory
+**Gate evaluation metric**: `(gt_stable AND gt_habitable AND ml_stable AND ml_habitable) / (gt_stable AND gt_habitable)` — the fraction of truly stable+habitable cells that the model correctly identifies as such.
 
-| Directory (in `src/`) | Description | Notes |
-|---|---|---|
-| `models/` (deployed) | Currently holds `models_temphead` weights | Loaded by agent service at runtime |
-| `models_temphead/` | Baseline: temphead architecture (moon_temp_norm + habitable_from_temp head), no logfix/psdfix | Primary reference model |
-| `models_temphead_ss/` | Per-step Bernoulli SS fine-tune of models_temphead (sampling_prob 0→0.1, stopped epoch 8, never exceeded ~5% sampling) | Improved prograde recall; hurt retrograde (aligned both heads at wrong answer in retrograde edge-of-HZ systems) |
-| `models_temphead_ss_prefix/` | Shrinking-prefix K-step SS fine-tune (k_start=1000→k_end=1 over 15 ramp epochs, warm from models_temphead) | Best on K-452b-v2 alone; fails 4-system gate — regresses K-1229b retrograde catastrophically |
-| `models_logfix/` | Resolution-compression bug fix (log-transform of log-sampled SYS_COLS before StandardScaler) | Bug fix is real and correct; recall not improved vs baseline — not the dominant driver of habitable recall gap |
+---
 
-`models_temphead` and `models_temphead_ss` carry their original pre-logfix/pre-psdfix weights. The AND criterion is inference-only and does not affect stored weights.
+### GRU/LSTM: Retired
 
-#### Recall Baselines (fresh, as of 2026-07-02)
+The `MoonRNN` class (`exomoon/ml/model.py`) and its trained checkpoints (`models_temphead`, `models_stageC_seed123`, etc.) remain in the codebase for reference but are no longer called at inference. The autoregressive GRU rollout had two fundamental failure modes that were never resolved:
 
-Metric: `(gt_stable=True AND gt_habitable=True AND ml_stable=True AND ml_habitable=True) / (gt_stable=True AND gt_habitable=True)`
+1. **Trajectory tracking failure** (prograde systems): both dist head and flag head failed together — `moon_star_dist_norm` drifted outside [0, 0.881] even for truly habitable candidates. The AND criterion (two heads must agree before marking uninhabitable) could not fix this because both heads agreed on the wrong answer.
 
-**Stable recall** (for reference — much higher than habitable recall):
+2. **Classification miscalibration** (retrograde M-dwarf systems): dist head tracked correctly but flag head misfired. AND criterion improved this (+28 pp for K-1229b retrograde) but the underlying issue was never resolved.
 
-| Model | K-452b-v2 pro | K-452b-v2 retro | K-1229b pro | K-1229b retro |
-|---|---|---|---|---|
-| models_temphead | 0.964 | 0.944 | 0.887 | 0.950 |
-| models_temphead_ss | 0.935 | 0.959 | 0.910 | 0.964 |
-
-**Habitable recall** — with AND criterion applied at inference (current state):
-
-| Model | K-452b-v2 pro | K-452b-v2 retro | K-1229b pro | K-1229b retro | Overall avg |
-|---|---|---|---|---|---|
-| models_temphead + AND | 0.386 | 0.581 | 0.170 | 0.596 | 0.433 |
-| models_temphead_ss + AND | 0.438 | 0.361 | 0.373 | 0.314 | 0.372 |
-
-The stable vs habitable recall gap (e.g. 0.964 vs 0.386 for K-452b-v2 prograde) is the core unsolved problem. It is not explained by any of the hypotheses tested to date.
-
-#### Two Failure Modes
-
-1. **Trajectory tracking failure** (K-452b-v2 prograde, K-1229b prograde): both dist head AND flag head fail together — the dist head's `moon_star_dist_norm` drifts outside [0, 0.881] during autoregressive rollout even for candidates that are truly habitable. The AND criterion cannot help — it requires head disagreement, but here both heads agree (and are both wrong). Root cause unknown; candidate: `moon_star_dist` is dominated by the slower planet-orbit timescale while `moon_planet_dist` benefits from the faster, frequently-repeating moon orbit timescale — a structural asymmetry between the two regression targets that was identified but never properly tested.
-
-2. **Classification miscalibration** (K-1229b retrograde): dist head tracks correctly (stays in [0, 0.881]) but flag head misfires uninhabitable. AND criterion fixed this for models_temphead (0.314→0.596). models_temphead_ss is largely immune to this fix because SS aligned both heads at the wrong answer together.
-
-#### What Was Tried and Discarded
-
-| Approach | Outcome |
-|---|---|
-| logfix: log-transform of log-sampled SYS_COLS before StandardScaler | Real bug, correctly fixed — but not the dominant driver of recall gap. Full recall regression when not applied consistently across all paths (training, dataset, inference). Abandoned. |
-| psdfix: planet_star_dist → planet_star_dist/ap_AU in STATE_COLS | Caused 0.386→0.025 recall catastrophe. Abandoned. |
-| Representational competition (dedicated habitable-only head) | Tied with multi-task model in fair 30-epoch comparison. Not a capacity/architecture problem. Discarded. |
-| Warmup-window extension / fractional-tolerance thresholds | Helped only one specific failure shape (K-1229b retrograde brief-dip pattern), negligible or harmful elsewhere. Discarded. |
-| ep capacity hypothesis | Refuted with n=595 validation sims (correlation ≈0). ep is proportionally represented in training. Discarded. |
-| 2D (Ts, ap_AU) box coverage gap | Original "0.9% vs 5.3%" comparison was apples-to-oranges. Redone fairly: 0.91% vs 1.31%, modest ~1.4×, not explanatory. Discarded. |
-| Per-step Bernoulli scheduled sampling (models_temphead_ss) | Hurt retrograde recall: aligned both heads at wrong answer. Only ~5% sampling at epoch 8 — barely any SS. Discarded. |
-| Shrinking-prefix K-step scheduled sampling (models_temphead_ss_prefix) | Helps K-452b-v2 (both directions) but catastrophically regresses K-1229b retrograde. Fails 4-system gate. Discarded. |
-| AND criterion for habitability (Option #1 — IMPLEMENTED) | Meaningful fix for classification miscalibration (K-1229b retrograde: +28pp on models_temphead). No effect on trajectory tracking failures. Kept in inference.py. |
-| Consistency regularization loss between dist and flag heads (Option #5) | Redundant with AND on the one failure mode it addresses; cannot help trajectory tracking failures where both heads fail together. Requires retraining. Not implemented. |
-
-#### Known Data Artifacts (Explicitly Deferred)
-
-1. **Freeze-post-escape labeling**: when a moon escapes mid-simulation, `moon_star_dist` freezes at its last pre-escape position for the remainder of the ~1000-step resampled trajectory. This means ~21–50% of `habitable=True` labels for escaped moons are actually replays of the last valid position, not real trajectory evolution. Confirmed real; confirmed not the dominant cause of the clean-subset recall problem; the fix (replace the freeze with a continuing arcsinh-scaled trajectory) requires full dataset regeneration and has never been built or tested.
-
-2. **Deep ensembles / uncertainty quantification**: discussed as a mechanism to surface low-confidence predictions near sparse regions of parameter space (small rhill_AU systems), not to fix accuracy directly. Not implemented.
+The GRU was replaced by `AuxMLPBinary` (simulation-level classifier, no rollout) for classification, and by the Hill-frame HNN + GT Numba leapfrog for trajectory preview. The `models_temphead/` checkpoint is preserved as a historical reference (CLAUDE.md July 2026 had it as production).
 
 ---
 
