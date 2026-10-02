@@ -216,6 +216,8 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
   const [trajLoading,       setTrajLoading]        = useState(false);
   const [trajError,         setTrajError]          = useState<string | null>(null);
   const [trajProgress,      setTrajProgress]       = useState<string | null>(null);
+  const [warmingUp,         setWarmingUp]          = useState(false);
+  const warmingRetryRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const trajPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [trajResultByEngine, setTrajResultByEngine] = useState<Record<string, TrajResult | null>>({
     gt_leapfrog: null,
@@ -246,12 +248,16 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     }
   }, [chatCellFrames, chatCellMmEarth, chatCellAmHill, trajResult]);
 
-  // Cleanup: clear any running HNN poll interval on unmount.
+  // Cleanup: clear any running poll or warming-up retry intervals on unmount.
   useEffect(() => {
     return () => {
       if (trajPollRef.current) {
         clearInterval(trajPollRef.current);
         trajPollRef.current = null;
+      }
+      if (warmingRetryRef.current) {
+        clearInterval(warmingRetryRef.current);
+        warmingRetryRef.current = null;
       }
     };
   }, []);
@@ -417,11 +423,16 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
   }, [trajEngine, mlPrediction]);
 
   const handleTrajBatch = useCallback(async (forceRefresh = false) => {
-    // Stop any existing HNN poll before starting a new request
+    // Stop any existing HNN poll or warming-up retry before starting a new request
     if (trajPollRef.current) {
       clearInterval(trajPollRef.current);
       trajPollRef.current = null;
     }
+    if (warmingRetryRef.current) {
+      clearInterval(warmingRetryRef.current);
+      warmingRetryRef.current = null;
+    }
+    setWarmingUp(false);
     setTrajLoading(true);
     setTrajError(null);
     setTrajProgress(null);
@@ -496,6 +507,81 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
         return; // loading stays true; finally block must not clear it
       }
 
+      // GPU warming up — instance was stopped and is now starting
+      if (data.warming_up) {
+        setWarmingUp(true);
+        setTrajProgress(`GPU engine starting up (~${Math.round((data.estimated_wait_s as number ?? 180) / 60)} min)…`);
+        // Auto-retry every 20s until the engine is ready
+        if (warmingRetryRef.current) clearInterval(warmingRetryRef.current);
+        warmingRetryRef.current = setInterval(() => {
+          setTrajProgress(prev => {
+            // Keep showing the warming up message until the next fetch resolves
+            return prev ?? 'GPU engine starting… retrying';
+          });
+          // Trigger a fresh fetch — if still warming_up the interval keeps running
+          // If successful, _applyTrajResult clears warmingUp state
+          void fetch(`${AGENT_DIRECT}/trajectory/preview`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              system_params: {
+                ms_solar: params.ms_solar,
+                rs_solar: params.rs_solar,
+                Ts:       params.Ts,
+                mp_earth: params.mp_earth,
+                dp_cgs:   params.dp_cgs,
+                ap_AU:    params.ap_AU,
+                ep:       params.ep,
+              },
+              t_sim:           simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0),
+              moon_retrograde: params.moon_retrograde,
+              em:              params.em,
+              mm_resolution:   gridSize,
+              am_resolution:   gridSize,
+              escape_factor:   1.0,
+              mode:            trajEngine,
+              model_version:   'hinge4_v1',
+              force_refresh:   false,
+            }),
+          }).then(r => r.json()).then((retryData: Record<string, unknown>) => {
+            if (retryData.warming_up) return; // still starting, keep polling
+            if (warmingRetryRef.current) { clearInterval(warmingRetryRef.current); warmingRetryRef.current = null; }
+            setWarmingUp(false);
+            if (retryData.ok || retryData.map_both) {
+              _applyTrajResult(retryData);
+              setTrajLoading(false);
+              setTrajProgress(null);
+            } else if (retryData.status === 'computing' && retryData.job_id) {
+              // HNN async job started on the now-running instance — hand off to poll loop
+              const jobId = retryData.job_id as string;
+              setTrajProgress(`Computing… ${retryData.elapsed_s ?? 0}s elapsed`);
+              if (trajPollRef.current) clearInterval(trajPollRef.current);
+              trajPollRef.current = setInterval(async () => {
+                try {
+                  const pollRes  = await fetch(`${AGENT_DIRECT}/trajectory/job/${jobId}/status`);
+                  const pollData = await pollRes.json() as Record<string, unknown>;
+                  if (pollData.status === 'computing') {
+                    setTrajProgress(`Computing… ${pollData.elapsed_s ?? '?'}s elapsed`);
+                  } else if (pollData.status === 'done') {
+                    clearInterval(trajPollRef.current!); trajPollRef.current = null;
+                    _applyTrajResult(pollData); setTrajLoading(false); setTrajProgress(null);
+                  } else {
+                    clearInterval(trajPollRef.current!); trajPollRef.current = null;
+                    setTrajError((pollData.detail as string | undefined) ?? 'HNN job failed');
+                    setTrajLoading(false); setTrajProgress(null);
+                  }
+                } catch { clearInterval(trajPollRef.current!); trajPollRef.current = null; setTrajLoading(false); setTrajProgress(null); }
+              }, 5000);
+            } else {
+              setTrajError((retryData.message as string | undefined) ?? 'Trajectory batch failed');
+              setTrajLoading(false);
+              setTrajProgress(null);
+            }
+          }).catch(() => { /* keep polling */ });
+        }, 20000);
+        return; // loading stays true while warming up
+      }
+
       // Synchronous result (GT leapfrog, or HNN S3 cache hit)
       if (data.ok || data.map_both) {
         _applyTrajResult(data);
@@ -505,11 +591,11 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     } catch (e: unknown) {
       setTrajError(e instanceof Error ? e.message : 'Network error');
     } finally {
-      if (!asyncJobStarted) {
+      if (!asyncJobStarted && !warmingUp) {
         setTrajLoading(false);
       }
     }
-  }, [params, simYears, gridSize, trajEngine, mlPrediction, setPreviewCellFrames, _applyTrajResult]);
+  }, [params, simYears, gridSize, trajEngine, mlPrediction, warmingUp, setPreviewCellFrames, _applyTrajResult]);
 
   const handleCellApplyAndRun = useCallback(() => {
     if (!trajResult || !selectedCell || !selectedCellFrames) return;
@@ -1275,9 +1361,16 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
                         ? <Loader2 size={11} className="animate-spin" />
                         : <Zap size={11} />}
                       {trajLoading
-                        ? (trajProgress ?? (trajEngine === 'hnn_hinge4' ? 'Submitting HNN job…' : 'Running batch integrator…'))
+                        ? (warmingUp
+                            ? (trajProgress ?? 'GPU engine starting (~2 min)…')
+                            : (trajProgress ?? (trajEngine === 'hnn_hinge4' ? 'Submitting HNN job…' : 'Running batch integrator…')))
                         : 'Run Trajectory Batch'}
                     </button>
+                    {warmingUp && (
+                      <p className="text-amber-400/80 text-[10px] text-center px-1">
+                        ⏳ GPU engine warming up — page will retry automatically every 20 s
+                      </p>
+                    )}
                     {/* Force-refresh: bypasses S3 cache and re-calls EC2 for fresh HNN result */}
                     {trajResult && !trajLoading && (
                       <button

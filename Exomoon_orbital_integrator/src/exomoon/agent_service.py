@@ -175,8 +175,44 @@ s3 = boto3.client("s3", region_name=AWS_REGION) if AWS_ENABLED and BUCKET else N
 sf = boto3.client("stepfunctions", region_name=AWS_REGION) if AWS_ENABLED and STATE_MACHINE_ARN else None
 
 # ── GPU trajectory-preview service (EC2 g4dn.xlarge, hnn_gpu_service.py) ──────
-GPU_SERVICE_URL       = os.getenv("GPU_SERVICE_URL", "http://52.56.252.104:8001")
+GPU_SERVICE_URL       = os.getenv("GPU_SERVICE_URL", "http://13.134.42.127:8001")
 GPU_SERVICE_TIMEOUT_S = int(os.getenv("GPU_SERVICE_TIMEOUT_S", "2400"))
+GPU_INSTANCE_ID       = os.getenv("GPU_INSTANCE_ID", "i-0be2b62719a4cdde2")
+
+_ec2 = boto3.client("ec2", region_name=AWS_REGION) if AWS_ENABLED else None
+_gpu_start_lock = threading.Lock()
+
+
+def _ensure_gpu_running() -> dict:
+    """
+    Check EC2 GPU instance state and start it if stopped.
+    Returns {"ready": True} if already running, or {"warming_up": True, "estimated_wait_s": N}.
+    Thread-safe; uses _gpu_start_lock to avoid duplicate start_instances calls.
+    """
+    if not AWS_ENABLED or _ec2 is None:
+        return {"warming_up": True, "estimated_wait_s": 120}
+    with _gpu_start_lock:
+        try:
+            resp  = _ec2.describe_instances(InstanceIds=[GPU_INSTANCE_ID])
+            state = resp["Reservations"][0]["Instances"][0]["State"]["Name"]
+        except Exception as e:
+            print(f"[GPU_START] describe_instances failed: {e}", flush=True)
+            return {"warming_up": True, "estimated_wait_s": 120}
+
+        print(f"[GPU_START] Instance state: {state}", flush=True)
+        if state == "running":
+            return {"ready": True}
+        if state == "stopped":
+            print(f"[GPU_START] Starting {GPU_INSTANCE_ID}…", flush=True)
+            try:
+                _ec2.start_instances(InstanceIds=[GPU_INSTANCE_ID])
+            except Exception as e:
+                print(f"[GPU_START] start_instances failed: {e}", flush=True)
+            return {"warming_up": True, "estimated_wait_s": 180}
+        if state in ("pending", "stopping"):
+            return {"warming_up": True, "estimated_wait_s": 120}
+        # terminated or other unrecoverable state
+        return {"warming_up": False, "error": f"EC2 instance in unrecoverable state: {state}"}
 # Inference cache — separate S3 bucket so existing nbody-time-series-storage is untouched
 INFERENCE_CACHE_BUCKET = os.getenv("INFERENCE_CACHE_BUCKET", "exomoon-ml-inference-cache")
 # Bump MODEL_VERSION when HNN weights are updated; old cache entries are automatically orphaned
@@ -3931,7 +3967,12 @@ def _run_hnn_background(job_id: str, req: "TrajectoryPreviewRequest", key: str) 
 
 
 def _forward_to_gpu(mode: str, req: TrajectoryPreviewRequest) -> Dict:
-    """Forward batch request to EC2 hnn_gpu_service.py and return parsed JSON result."""
+    """Forward batch request to EC2 hnn_gpu_service.py and return parsed JSON result.
+
+    On connection failure, checks EC2 instance state and starts it if stopped.
+    Returns {"ok": False, "warming_up": True, ...} so the frontend can show a spinner
+    and auto-retry rather than surfacing a raw network error to the user.
+    """
     endpoint = "/hnn/predict" if mode == "hnn_hinge4" else "/gt/predict_numba"
     url = GPU_SERVICE_URL.rstrip("/") + endpoint
     body = {
@@ -3944,9 +3985,27 @@ def _forward_to_gpu(mode: str, req: TrajectoryPreviewRequest) -> Dict:
         "escape_factor":   req.escape_factor,
         "n_steps":         5000,
     }
-    resp = _requests.post(url, json=body, timeout=GPU_SERVICE_TIMEOUT_S)
-    resp.raise_for_status()
-    return resp.json()
+    try:
+        resp = _requests.post(url, json=body, timeout=GPU_SERVICE_TIMEOUT_S)
+        resp.raise_for_status()
+        return resp.json()
+    except (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as e:
+        print(f"[GPU] Connection failed ({type(e).__name__}) — checking EC2 state", flush=True)
+        start_result = _ensure_gpu_running()
+        if start_result.get("warming_up"):
+            wait_s = start_result.get("estimated_wait_s", 180)
+            return {
+                "ok":             False,
+                "warming_up":     True,
+                "message":        f"GPU engine is starting up (~{wait_s // 60} min). The page will retry automatically.",
+                "estimated_wait_s": wait_s,
+            }
+        if not start_result.get("ready"):
+            raise HTTPException(status_code=503,
+                                detail=start_result.get("error", "GPU instance unavailable"))
+        # Instance is running but service not responding — propagate original error
+        raise HTTPException(status_code=503,
+                            detail=f"GPU service unreachable (instance running): {type(e).__name__}: {e}")
 
 
 @app.post("/trajectory/preview")

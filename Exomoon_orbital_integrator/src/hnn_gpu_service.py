@@ -41,6 +41,9 @@ HNN_MODEL_DIR = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_hnn_hill_hinge4"),
 )
 
+# Tracks Unix timestamp of last inference request — read by idle_shutdown.sh on the EC2 host
+_last_request_ts: float = 0.0
+
 app = FastAPI(title="Exomoon HNN GPU Service", version="1.0.0")
 
 app.add_middleware(
@@ -76,6 +79,12 @@ def health():
     }
 
 
+@app.get("/last_request_time")
+def last_request_time():
+    """Returns the Unix timestamp of the last inference request. Used by idle_shutdown.sh."""
+    return {"last_request_ts": _last_request_ts}
+
+
 def _to_serializable(obj):
     """Recursively convert numpy arrays / scalars to Python-native types."""
     import numpy as np
@@ -94,6 +103,8 @@ def _to_serializable(obj):
 
 @app.post("/hnn/predict")
 def hnn_predict(req: HnnPredictRequest):
+    global _last_request_ts
+    _last_request_ts = time.time()
     from exomoon.ml.hnn_inference_hill import batch_hnn_hill_trajectories
 
     t0 = time.perf_counter()
@@ -118,6 +129,8 @@ def hnn_predict(req: HnnPredictRequest):
 
 @app.post("/gt/predict")
 def gt_predict(req: HnnPredictRequest):
+    global _last_request_ts
+    _last_request_ts = time.time()
     from exomoon.ml.batch_leapfrog import batch_leapfrog_trajectories
 
     t0 = time.perf_counter()
@@ -148,6 +161,8 @@ def gt_predict_numba(req: HnnPredictRequest):
     in the response. Transfer size: ~15-30MB vs 486MB uncompressed JSON. No EC2-side storage.
     Agent service decompresses and stores in its own RAM for instant cell clicks.
     """
+    global _last_request_ts
+    _last_request_ts = time.time()
     import numpy as np
     from exomoon.ml.batch_leapfrog_numba_cuda import batch_leapfrog_numba_trajectories
 
