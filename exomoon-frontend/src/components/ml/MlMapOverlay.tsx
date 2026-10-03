@@ -138,10 +138,11 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     params, simYears,
     mlPrediction, mlMassIdx,
     setMlPrediction, setMlMassIdx,
-    setParam,
+    setParam, setParams,
     setPreviewCellFrames,
     setTrajectoryData,
     setBatchHz,
+    setBatchSystemParams,
     chatCellFrames,
     chatCellMmEarth,
     chatCellAmHill,
@@ -454,6 +455,12 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       };
       batchHzRef.current = capturedHz;   // keep ref for same-session fast access
       setBatchHz(capturedHz);            // persist in store across panel close/reopen
+      // Also save the full star+planet system params so cell clicks can restore them.
+      setBatchSystemParams({
+        ms_solar: params.ms_solar, rs_solar: params.rs_solar, Ts: params.Ts,
+        mp_earth: params.mp_earth, dp_cgs: params.dp_cgs,
+        ap_AU: params.ap_AU, ep: params.ep, em: params.em,
+      });
     }
     let asyncJobStarted = false;
     try {
@@ -615,6 +622,9 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
 
   const handleCellApplyAndRun = useCallback(() => {
     if (!trajResult || !selectedCell || !selectedCellFrames) return;
+    // Restore batch system params first, then apply cell-specific moon params.
+    const storedBatchSys = useSimulationStore.getState().batchSystemParams;
+    if (storedBatchSys) setParams(storedBatchSys);
     setParam('mm_earth', trajResult.mm_grid[selectedCell.mmIdx]);
     setParam('am_hill',  trajResult.am_grid[selectedCell.amIdx]);
     // Inject HNN/GT frames directly — no new simulation needed.
@@ -639,7 +649,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       a_outer_au: hz.a_outer_au,
       rhill_AU:   localRhill,
     });
-  }, [trajResult, selectedCell, selectedCellFrames, setParam, setTrajectoryData,
+  }, [trajResult, selectedCell, selectedCellFrames, setParam, setParams, setTrajectoryData,
       simYears, trajEngine, params]);
 
   // ── Trajectory grid callbacks ──────────────────────────────────────────────
@@ -756,7 +766,10 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
         rhill_AU:   rhillAULocal,
       });
 
-      // Update moon sliders to reflect the clicked cell's parameters.
+      // Restore batch system params (star + planet) and update moon params for this cell.
+      // This keeps all sliders in sync with the batch system the user is exploring.
+      const storedBatchSys = useSimulationStore.getState().batchSystemParams;
+      if (storedBatchSys) setParams(storedBatchSys);
       if (trajResult && selectedCell) {
         setParam('mm_earth', trajResult.mm_grid[selectedCell.mmIdx]);
         setParam('am_hill',  trajResult.am_grid[selectedCell.amIdx]);
@@ -767,7 +780,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     } finally {
       setCellTrajLoading(false);
     }
-  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames, setTrajectoryData, setParam]);
+  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames, setTrajectoryData, setParam, setParams]);
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   useEffect(() => {

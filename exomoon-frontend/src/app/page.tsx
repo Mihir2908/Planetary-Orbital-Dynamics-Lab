@@ -1,5 +1,5 @@
 'use client';
-import React, { useRef, useState, useCallback, useEffect, memo } from 'react';
+import React, { useRef, useState, useCallback, useEffect, useMemo, memo } from 'react';
 import {
   BarChart2, X, GripHorizontal, Sun, Globe, Moon,
   CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain, HelpCircle, Info,
@@ -339,10 +339,19 @@ export default function HomePage() {
     moon:   bodyRadiusAU(params.mm_earth, dmCgs),
   };
 
-  // All setTrajectoryData callers bake the correct HZ into simMeta at call time
-  // (simulation path: from backend summary.json; cell click / apply-and-run: from
-  // batchHzRef captured at batch-request time). Never override from current slider params.
-  const hzMeta = simMeta;
+  // HZ is computed live from the current slider params (rs_solar, Ts) so it always
+  // reflects what the sliders show — whether from a simulation, a batch cell click,
+  // or manual slider adjustment.  simMeta provides dt / t_end / rhill_AU.
+  const hzMeta = useMemo((): SimulationMeta | null => {
+    if (!simMeta) return null;
+    const rs_m = params.rs_solar * 6.957e8;
+    const L    = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
+    return {
+      ...simMeta,
+      a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
+      a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
+    };
+  }, [params.rs_solar, params.Ts, simMeta]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // When a chatbot cell query arrives, show those frames in the 3D canvas and mini orbit

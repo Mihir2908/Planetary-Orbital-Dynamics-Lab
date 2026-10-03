@@ -77,6 +77,11 @@ interface SimulationStore {
   batchHz: { a_inner_au: number; a_outer_au: number } | null;
   setBatchHz: (hz: { a_inner_au: number; a_outer_au: number } | null) => void;
 
+  // ── Batch system params (star + planet params captured at batch-request time) ──
+  // Restored to sliders on every cell click so star/planet/moon all reflect the batch.
+  batchSystemParams: Partial<SystemParams> | null;
+  setBatchSystemParams: (p: Partial<SystemParams> | null) => void;
+
   // ── Trajectory Preview (Layer 2 — chatbot push, separate from Layer 1) ───────
   trajPreview: TrajPreview | null;
   setTrajPreview: (p: TrajPreview | null) => void;
@@ -202,6 +207,10 @@ export const useSimulationStore = create<SimulationStore>()(
       // ── Batch HZ ─────────────────────────────────────────────────────────────
       batchHz: null,
       setBatchHz: (hz) => set({ batchHz: hz }),
+
+      // ── Batch system params ───────────────────────────────────────────────────
+      batchSystemParams: null,
+      setBatchSystemParams: (p) => set({ batchSystemParams: p }),
 
       // ── Trajectory Preview (Layer 2) ──────────────────────────────────────────
       trajPreview: null,
