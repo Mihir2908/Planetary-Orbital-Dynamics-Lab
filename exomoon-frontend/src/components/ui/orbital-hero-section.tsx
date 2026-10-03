@@ -14,6 +14,13 @@ export type Planet = {
   color: string;
   size: number;
   glow?: number;
+  /**
+   * If set, this body orbits the planet at elems[parentIdx] rather than the
+   * central star. Its `a` and orbital elements are expressed in the same AU
+   * units but compress is forced to 1.0 for the local sub-orbit so the drawn
+   * distance from the parent body equals `a` directly.
+   */
+  parentIdx?: number;
 };
 
 export interface OrbitalHeroSectionProps
@@ -320,7 +327,12 @@ export function OrbitalHeroSection({
         C.planets.map((p) => p.name + p.a + p.e + p.color).join("|");
       if (key === elemsKey) return;
       elemsKey = key;
-      elems = C.planets.map((p, idx) => elementsOf(p, idx, C.compress, C.planeSpread, C.eccentricity, C.alignToCourse));
+      elems = C.planets.map((p, idx) => {
+        // Bodies that orbit a parent use compress=1 so their local `a` maps
+        // directly to drawn AU without radial squeezing.
+        const gamma = (p.parentIdx !== undefined) ? 1.0 : C.compress;
+        return elementsOf(p, idx, gamma, C.planeSpread, C.eccentricity, C.alignToCourse);
+      });
     }
 
     let D_NEAR = 60;
@@ -546,6 +558,8 @@ export function OrbitalHeroSection({
 
       if (C.showOrbits) {
         for (const el of elems) {
+          // Orbit guides only make sense around the central star; skip sub-orbiters.
+          if (el.p.parentIdx !== undefined) continue;
           const [r, g, b] = el.rgb;
           const steps = 160;
           ctx!.beginPath();
@@ -578,15 +592,31 @@ export function OrbitalHeroSection({
         const turns = span / el.period;
         const N = Math.max(48, Math.min(360, Math.ceil(turns * 46 * (1 + 2.2 * el.e)) + 48));
 
+        const parentIdx = el.p.parentIdx;
+        const hasParent = parentIdx !== undefined && parentIdx >= 0 && parentIdx < elems.length;
+
         const xs = new Float64Array(N + 1);
         const ys = new Float64Array(N + 1);
         const okArr = new Uint8Array(N + 1);
         for (let q = 0; q <= N; q++) {
           const age = (1 - q / N) * span;
-          const M = el.M0 + el.n * (t - age);
-          helio(el, M, C.compress);
+          const tStep = t - age;
+          const M = el.M0 + el.n * tStep;
           const back = C.driftSpeed * age;
-          project(R3.x - DIR.x * back, R3.y - DIR.y * back, R3.z - DIR.z * back);
+          let wx: number, wy: number, wz: number;
+          if (hasParent) {
+            // Sub-orbiter: world pos = parent_helio(tStep) + local_orbit(tStep)
+            // compress=1 for local orbit so drawn radius equals `a` directly.
+            helio(el, M, 1.0);
+            const lx = R3.x, ly = R3.y, lz = R3.z;
+            const parentEl = elems[parentIdx!];
+            helio(parentEl, parentEl.M0 + parentEl.n * tStep, C.compress);
+            wx = R3.x + lx; wy = R3.y + ly; wz = R3.z + lz;
+          } else {
+            helio(el, M, C.compress);
+            wx = R3.x; wy = R3.y; wz = R3.z;
+          }
+          project(wx - DIR.x * back, wy - DIR.y * back, wz - DIR.z * back);
           xs[q] = P.x; ys[q] = P.y; okArr[q] = P.ok ? 1 : 0;
           if (q === N && P.ok) shots.push({ el, x: P.x, y: P.y, depth: P.depth, s: P.s });
         }

@@ -16,10 +16,10 @@ function useNarrow(query = '(max-width: 767px)') {
   return narrow;
 }
 
-// Two-body system: a planet (blue) and a moon (red) orbiting the central star.
-// All six Keplerian elements are set so the two bodies have clearly distinct
-// orbit planes and periods — the helical trails read as two separate paths
-// rather than one messy tangle.
+// True 3-body hierarchy: planet (index 0) orbits the star; moon (index 1)
+// orbits the planet via parentIdx=0. The moon's `a` is in the same AU units
+// but compress is forced to 1.0 for its local sub-orbit, so the drawn orbit
+// radius equals `a` directly (≈ 0.26 × pxPerAU pixels around the planet).
 const EXOMOON_SYSTEM: Planet[] = [
   {
     name: 'Planet',
@@ -29,9 +29,10 @@ const EXOMOON_SYSTEM: Planet[] = [
   },
   {
     name: 'Moon',
-    a: 0.45, e: 0.07, i: 6.5,
+    a: 0.26, e: 0.06, i: 14.0,
     node: 195, peri: 260, M0: 45,
-    color: '#FF5555', size: 3.2, glow: 1.1,
+    color: '#FF5555', size: 3.0, glow: 1.1,
+    parentIdx: 0,
   },
 ];
 
@@ -64,11 +65,6 @@ export default function LandingPage() {
           lg:px-20
         `}>
           <div className="max-w-[34rem]">
-            {/* Eyebrow */}
-            <p className="mb-4 text-[0.7rem] font-mono tracking-[0.22em] uppercase text-blue-400/60">
-              Exomoon Orbital Integrator
-            </p>
-
             {/* Heading */}
             <h1 className="text-[2.3rem] font-light leading-[1.06] tracking-[-0.03em] text-white sm:text-5xl lg:text-[4rem]">
               A 3-Body Planetary
@@ -79,8 +75,8 @@ export default function LandingPage() {
             {/* Subtitle */}
             <p className="mt-5 max-w-[27rem] text-[0.9rem] leading-relaxed text-white/50 md:mt-6">
               Not every moon survives. Configure any star-planet-moon system,
-              simulate Newtonian three-body dynamics, and map stability and
-              habitability across thousands of configurations — from exact physics
+              simulate Newtonian three-body dynamics, and map moon stability and
+              habitability across thousands of system configurations — from exact physics
               to two-layer ML inference in seconds.
             </p>
 
