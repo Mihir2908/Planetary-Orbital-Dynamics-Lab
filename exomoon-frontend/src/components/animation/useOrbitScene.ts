@@ -2,11 +2,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { TrajectoryFrame, SimulationMeta } from '@/lib/types';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
@@ -74,11 +69,8 @@ export function useOrbitScene(
   const speedRef      = useRef(1);
   const framesRef     = useRef<TrajectoryFrame[] | null>(null);
 
-  const rendererRef         = useRef<THREE.WebGLRenderer | null>(null);
-  const composerRef         = useRef<EffectComposer | null>(null);  // final composite → screen
-  const bloomOnlyComposerRef = useRef<EffectComposer | null>(null); // star-only bloom → offscreen RT
-  const bloomMixPassRef     = useRef<ShaderPass | null>(null);      // injects bloom RT into final pass
-  const starFieldMeshesRef  = useRef<THREE.Points[]>([]);           // hidden during bloom pass
+  const rendererRef     = useRef<THREE.WebGLRenderer | null>(null);
+  const starGlowRef     = useRef<THREE.Sprite | null>(null);  // additive glow sprite around the star
   const labelRendererRef    = useRef<CSS2DRenderer | null>(null);
   const sceneRef         = useRef<THREE.Scene | null>(null);
   const cameraRef        = useRef<THREE.PerspectiveCamera | null>(null);
@@ -167,80 +159,52 @@ export function useOrbitScene(
     scene.add(dirLight);
     sceneRef.current = scene;
 
-    // Enhanced starfield — 3 spectral layers at pixel-space size (sizeAttenuation: false)
-    // so stars stay crisp at all zoom levels without scaling with the scene.
-    // Saved to starFieldMeshesRef so the selective-bloom pass can hide them.
-    const mkStarField = (n: number, color: number, size: number): THREE.Points => {
+    // Starfield — 3 spectral layers, pixel-space size so stars stay crisp at all zoom levels.
+    const mkStarField = (n: number, color: number, size: number) => {
       const geo = new THREE.BufferGeometry();
       const pos = new Float32Array(n * 3);
       for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 400;
       geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: false }));
-      scene.add(pts);
-      return pts;
+      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: false })));
     };
-    starFieldMeshesRef.current = [
-      mkStarField(2000, 0xffffff, 1.8),  // bright white
-      mkStarField(3000, 0xadd8ff, 1.2),  // blue-white
-      mkStarField(5000, 0x9999bb, 0.8),  // cool dim
-    ];
+    mkStarField(2000, 0xffffff, 1.8);
+    mkStarField(3000, 0xadd8ff, 1.2);
+    mkStarField(5000, 0x9999bb, 0.8);
 
     const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.0001, 500);
     camera.position.set(0, 3, 6);
     cameraRef.current = camera;
 
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-    // ── Selective bloom — two-composer pipeline ─────────────────────────────
-    // Problem: UnrealBloomPass downsamples to 1/32 before upsampling; 2000 bright
-    // white star-field points scattered across the frame bleed into that low-res
-    // pyramid and produce a uniform canvas-wide haze.
-    // Solution: bloom-only composer runs with star-field hidden (only the solar star
-    // contributes); final composer renders the full scene and additively blends the
-    // bloom result on top. Star-field appears at full brightness — it just never
-    // feeds the bloom pyramid.
-
-    // 1. Bloom-only composer (star only → bloom → offscreen render target)
-    const bloomOnlyComposer = new EffectComposer(renderer);
-    bloomOnlyComposer.renderToScreen = false;
-    bloomOnlyComposer.addPass(new RenderPass(scene, camera));
-    bloomOnlyComposer.addPass(new UnrealBloomPass(
-      new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-      0.6,   // strength — kept at original approved value
-      0.25,  // radius
-      0.8,   // luminance threshold
-    ));
-    bloomOnlyComposerRef.current = bloomOnlyComposer;
-
-    // 2. Final composer: full scene + additive bloom overlay + sRGB correction
-    const bloomMixShader = new THREE.ShaderMaterial({
-      uniforms: {
-        baseTexture:  { value: null },
-        bloomTexture: { value: null },
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
-      `,
-      fragmentShader: `
-        uniform sampler2D baseTexture;
-        uniform sampler2D bloomTexture;
-        varying vec2 vUv;
-        void main() {
-          gl_FragColor = texture2D(baseTexture, vUv)
-                       + vec4(texture2D(bloomTexture, vUv).rgb, 0.0);
-        }
-      `,
+    // ── Star glow sprite — additive radial glow centred on the solar star ────
+    // Uses a canvas-generated radial-gradient texture and THREE.AdditiveBlending,
+    // so the glow is strictly additive and purely local to the star position.
+    // No EffectComposer or post-processing is needed — zero global side-effects.
+    const glowSize = 256;
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = glowSize; glowCanvas.height = glowSize;
+    const glowCtx = glowCanvas.getContext('2d')!;
+    const glowGrad = glowCtx.createRadialGradient(
+      glowSize / 2, glowSize / 2, 0,
+      glowSize / 2, glowSize / 2, glowSize / 2,
+    );
+    glowGrad.addColorStop(0.0,  'rgba(255, 245, 180, 1.0)');
+    glowGrad.addColorStop(0.15, 'rgba(255, 220, 80,  0.9)');
+    glowGrad.addColorStop(0.35, 'rgba(255, 180, 20,  0.45)');
+    glowGrad.addColorStop(0.65, 'rgba(255, 140, 0,   0.15)');
+    glowGrad.addColorStop(1.0,  'rgba(255, 100, 0,   0.0)');
+    glowCtx.fillStyle = glowGrad;
+    glowCtx.fillRect(0, 0, glowSize, glowSize);
+    const glowTex = new THREE.CanvasTexture(glowCanvas);
+    const glowMat = new THREE.SpriteMaterial({
+      map: glowTex,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      transparent: true,
     });
-    const mixPass = new ShaderPass(bloomMixShader, 'baseTexture');
-    mixPass.needsSwap = true;
-    bloomMixPassRef.current = mixPass;
-
-    const finalComposer = new EffectComposer(renderer);
-    finalComposer.addPass(new RenderPass(scene, camera));
-    finalComposer.addPass(mixPass);
-    finalComposer.addPass(new OutputPass());
-    composerRef.current = finalComposer;
+    const glowSprite = new THREE.Sprite(glowMat);
+    glowSprite.scale.set(STAR_BASE_R * 10, STAR_BASE_R * 10, 1);
+    scene.add(glowSprite);
+    starGlowRef.current = glowSprite;
 
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
@@ -323,8 +287,6 @@ export function useOrbitScene(
       const h = canvas.clientHeight;
       renderer.setSize(w, h, false);
       labelRenderer.setSize(w, h);
-      bloomOnlyComposerRef.current?.setSize(w, h);
-      composerRef.current?.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     });
@@ -411,23 +373,11 @@ export function useOrbitScene(
 
       controls.update();
 
-      // Selective bloom two-pass:
-      // 1. Render bloom onto a pure-black background (star-field hidden).
-      //    Without the black clear, the scene background colour (~0x050a14) sits in
-      //    the bloom texture and gets additively added a second time in the mix pass,
-      //    doubling the dark background and producing the canvas-wide haze.
-      // 2. Restore everything, render full scene, mix in bloom result.
-      const renderer = rendererRef.current!;
-      renderer.setClearColor(0x000000, 1);
-      starFieldMeshesRef.current.forEach(m => { m.visible = false; });
-      bloomOnlyComposerRef.current?.render();
-      renderer.setClearColor(0x050a14, 1);
-      if (bloomMixPassRef.current && bloomOnlyComposerRef.current) {
-        (bloomMixPassRef.current.uniforms as Record<string, THREE.IUniform>).bloomTexture.value =
-          bloomOnlyComposerRef.current.readBuffer.texture;
+      // Keep glow sprite centred on the solar star every frame.
+      if (starRef.current && starGlowRef.current) {
+        starGlowRef.current.position.copy(starRef.current.position);
       }
-      starFieldMeshesRef.current.forEach(m => { m.visible = true; });
-      composerRef.current?.render();
+      rendererRef.current!.render(scene, camera);
 
       labelRenderer.render(scene, camera);
     };
@@ -438,10 +388,11 @@ export function useOrbitScene(
       ro.disconnect();
       controls.dispose();
       renderer.dispose();
-      bloomOnlyComposerRef.current?.dispose();
-      bloomOnlyComposerRef.current = null;
-      composerRef.current?.dispose();
-      composerRef.current = null;
+      if (starGlowRef.current) {
+        (starGlowRef.current.material as THREE.SpriteMaterial).map?.dispose();
+        (starGlowRef.current.material as THREE.SpriteMaterial).dispose();
+        starGlowRef.current = null;
+      }
       canvas.removeEventListener('pointerdown', onPD);
       canvas.removeEventListener('pointerup',   onPU);
       labelRenderer.domElement.remove();
@@ -505,6 +456,8 @@ export function useOrbitScene(
       if (starRef.current)   starRef.current.scale.setScalar(starR   / STAR_BASE_R);
       if (planetRef.current) planetRef.current.scale.setScalar(planetR / PLANET_BASE_R);
       if (moonRef.current)   moonRef.current.scale.setScalar(moonR   / MOON_BASE_R);
+      // Scale glow sprite proportionally with the star's visual radius.
+      if (starGlowRef.current) starGlowRef.current.scale.set(starR * 10, starR * 10, 1);
     }
 
     // ── HZ shells ──────────────────────────────────────────────────────────
