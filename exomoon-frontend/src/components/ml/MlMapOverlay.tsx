@@ -983,7 +983,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     <div
       ref={panelRef}
       className={cn(
-        'absolute z-10 flex flex-col bg-gray-900/94 rounded-lg border border-violet-700/30 overflow-hidden',
+        'absolute z-10 flex flex-col bg-gray-900/94 rounded-lg border border-violet-700/30 overflow-hidden pointer-events-auto',
         !dragPos && 'top-16 right-3',
       )}
       style={{

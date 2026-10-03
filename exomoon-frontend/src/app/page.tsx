@@ -154,7 +154,7 @@ function ObjectOverlayShell({
     <div
       ref={panelRef}
       className={cn(
-        'absolute z-10 flex flex-col bg-gray-900/92 rounded-lg border overflow-hidden',
+        'absolute z-10 flex flex-col bg-gray-900/92 rounded-lg border overflow-hidden pointer-events-auto',
         accentClass,
         !dragPos    && 'top-36 left-1/2 -translate-x-1/2',
         !panelWidth && 'w-64',
@@ -264,7 +264,7 @@ const EdaOverlay = memo(function EdaOverlay({ onClose, containerRef }: ObjectOve
     <div ref={panelRef}
       className={cn(
         'absolute z-10 flex flex-col w-[min(820px,68%)] max-h-[55%]',
-        'bg-gray-900/90 rounded-lg border border-gray-700/40 overflow-hidden',
+        'bg-gray-900/90 rounded-lg border border-gray-700/40 overflow-hidden pointer-events-auto',
         !dragPos && 'top-3 left-1/2 -translate-x-1/2',
       )}
       style={dragPos ? { left: dragPos.left, top: dragPos.top } : undefined}
@@ -550,12 +550,11 @@ export default function HomePage() {
                       isRunning && 'opacity-40 cursor-not-allowed'
                     )}
                   />
-                  <span className="text-xs text-gray-600 shrink-0">(0=1 orbit)</span>
                   <MovingBorder
                     id="tutorial-run-btn"
                     onClick={handleRun}
                     disabled={isRunning}
-                    containerClassName="ml-auto"
+                    containerClassName="ml-auto shrink-0"
                     className={cn(
                       'flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium transition-colors',
                       'bg-blue-600 hover:bg-blue-500 text-white',
@@ -873,7 +872,7 @@ export default function HomePage() {
       {/* Tutorial FAB — ? button above chatbot FAB */}
       <button
         onClick={() => { setTutorialStartStep(0); setTutorialOpen(true); }}
-        className="fixed bottom-[466px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
+        className="fixed bottom-[344px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
                    flex items-center justify-center transition-colors
                    bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
         title="Open tutorial"
