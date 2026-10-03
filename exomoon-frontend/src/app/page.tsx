@@ -811,7 +811,7 @@ export default function HomePage() {
       {/* Tutorial FAB — ? button above chatbot FAB */}
       <button
         onClick={() => { setTutorialStartStep(0); setTutorialOpen(true); }}
-        className="fixed bottom-[344px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
+        className="fixed bottom-[466px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
                    flex items-center justify-center transition-colors
                    bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
         title="Open tutorial"

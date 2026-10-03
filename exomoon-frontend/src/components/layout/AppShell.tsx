@@ -34,7 +34,7 @@ export function AppShell({ main, chat }: AppShellProps) {
         id="tutorial-chat-fab"
         onClick={() => setChatOpen(o => !o)}
         className={cn(
-          'fixed bottom-72 right-4 z-50 w-12 h-12 rounded-full shadow-lg',
+          'fixed bottom-[410px] right-4 z-50 w-12 h-12 rounded-full shadow-lg',
           'flex items-center justify-center transition-colors',
           chatOpen
             ? 'bg-gray-700 hover:bg-gray-600'
