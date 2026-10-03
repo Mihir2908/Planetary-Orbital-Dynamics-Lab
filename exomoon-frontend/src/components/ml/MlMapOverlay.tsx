@@ -141,6 +141,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     setParam,
     setPreviewCellFrames,
     setTrajectoryData,
+    setBatchHz,
     chatCellFrames,
     chatCellMmEarth,
     chatCellAmHill,
@@ -442,15 +443,17 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     setSelectedCell(null);
     setSelectedCellFrames(null);
     setPreviewCellFrames(null, null);
-    // Capture HZ from the params being sent in this request.
-    // Must happen before the await so we record what the batch was actually run with.
+    // Capture HZ from the params being sent in this request, stored in Zustand so
+    // it survives ML panel unmount/remount (unlike a useRef which resets on unmount).
     {
       const rs_m = params.rs_solar * 6.957e8;
       const L = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
-      batchHzRef.current = {
+      const capturedHz = {
         a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
         a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
       };
+      batchHzRef.current = capturedHz;   // keep ref for same-session fast access
+      setBatchHz(capturedHz);            // persist in store across panel close/reopen
     }
     let asyncJobStarted = false;
     try {
@@ -615,23 +618,27 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     setParam('mm_earth', trajResult.mm_grid[selectedCell.mmIdx]);
     setParam('am_hill',  trajResult.am_grid[selectedCell.amIdx]);
     // Inject HNN/GT frames directly — no new simulation needed.
-    // Compute meta inline (avoids TDZ: useMemo values declared after this callback).
     const tSim = simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0);
     const M_EARTH_MSUN = 3.003e-6;
     const localRhill = params.ap_AU * (1 - params.ep) *
       Math.cbrt(params.mp_earth * M_EARTH_MSUN / (3 * params.ms_solar));
-    // Preserve backend-authoritative HZ from the most recent simulation.
-    // batchHzRef is used only when no simulation has been run yet.
-    const prevSimMeta = useSimulationStore.getState().simMeta;
-    const batchHz = batchHzRef.current;
-    const meta: SimulationMeta = {
+    // Use batch HZ from the store (captured at batch-request time, survives panel remount).
+    const storedBatchHz = useSimulationStore.getState().batchHz;
+    const hz = storedBatchHz ?? (() => {
+      const rs_m = params.rs_solar * 6.957e8;
+      const L = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
+      return {
+        a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
+        a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
+      };
+    })();
+    setTrajectoryData(selectedCellFrames, {
       dt:         tSim / Math.max(selectedCellFrames.length - 1, 1),
       t_end:      tSim,
-      a_inner_au: prevSimMeta?.a_inner_au ?? batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
-      a_outer_au: prevSimMeta?.a_outer_au ?? batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
+      a_inner_au: hz.a_inner_au,
+      a_outer_au: hz.a_outer_au,
       rhill_AU:   localRhill,
-    };
-    setTrajectoryData(selectedCellFrames, meta);
+    });
   }, [trajResult, selectedCell, selectedCellFrames, setParam, setTrajectoryData,
       simYears, trajEngine, params]);
 
@@ -727,13 +734,40 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       const frames: TrajectoryFrame[] = data.frames;
       setSelectedCellFrames(frames);
       setPreviewCellFrames(frames, rocheFrac, rhillAULocal);
+
+      // Set simMeta so the main orbit view shows the HZ shell and stats panel.
+      // Use batch HZ from the store (captured at batch-request time, persists across
+      // ML panel unmount/remount). Fall back to current params if batch HZ is missing.
+      const storedBatchHz = useSimulationStore.getState().batchHz;
+      const hz = storedBatchHz ?? (() => {
+        const rs_m = params.rs_solar * 6.957e8;
+        const L = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
+        return {
+          a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
+          a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
+        };
+      })();
+      const tSim = simYears > 0 ? simYears : 10.0;
+      setTrajectoryData(frames, {
+        dt:         tSim / Math.max(frames.length - 1, 1),
+        t_end:      tSim,
+        a_inner_au: hz.a_inner_au,
+        a_outer_au: hz.a_outer_au,
+        rhill_AU:   rhillAULocal,
+      });
+
+      // Update moon sliders to reflect the clicked cell's parameters.
+      if (trajResult && selectedCell) {
+        setParam('mm_earth', trajResult.mm_grid[selectedCell.mmIdx]);
+        setParam('am_hill',  trajResult.am_grid[selectedCell.amIdx]);
+      }
     } catch (err) {
       console.error('[MlMapOverlay] Cell trajectory fetch failed:', err);
       setCellTrajError('Failed to load trajectory');
     } finally {
       setCellTrajLoading(false);
     }
-  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames]);
+  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames, setTrajectoryData, setParam]);
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   useEffect(() => {

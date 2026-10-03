@@ -72,6 +72,11 @@ interface SimulationStore {
   setMlPrediction: (p: MlPrediction | null) => void;
   setMlMassIdx: (i: number) => void;
 
+  // ── Batch HZ (star HZ captured when a trajectory batch was submitted) ─────────
+  // Persisted in the store (not a component ref) so it survives ML panel unmount/remount.
+  batchHz: { a_inner_au: number; a_outer_au: number } | null;
+  setBatchHz: (hz: { a_inner_au: number; a_outer_au: number } | null) => void;
+
   // ── Trajectory Preview (Layer 2 — chatbot push, separate from Layer 1) ───────
   trajPreview: TrajPreview | null;
   setTrajPreview: (p: TrajPreview | null) => void;
@@ -193,6 +198,10 @@ export const useSimulationStore = create<SimulationStore>()(
       mlMassIdx: 0,
       setMlPrediction: (p) => set({ mlPrediction: p, mlMassIdx: 0 }),
       setMlMassIdx: (i) => set({ mlMassIdx: i }),
+
+      // ── Batch HZ ─────────────────────────────────────────────────────────────
+      batchHz: null,
+      setBatchHz: (hz) => set({ batchHz: hz }),
 
       // ── Trajectory Preview (Layer 2) ──────────────────────────────────────────
       trajPreview: null,
