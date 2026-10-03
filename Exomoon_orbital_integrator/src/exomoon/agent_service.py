@@ -1483,6 +1483,7 @@ def _execute_tool(tool_name: str, tool_input: Dict[str, Any], req: ChatRequest, 
                     "from_cache":    result.get("from_cache", False),
                     "cache_key":     session.last_traj_key,
                     "mode":          mode,
+                    "system_params": system_params,
                 }
                 session._traj_preview_fresh = True
 
@@ -2438,11 +2439,19 @@ def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
         "rather than repeating the previous answer. The distinction: don't ask again just because time passed; "
         "do reconsider when the user actively says something is wrong.\n\n"
         "**Per-tool questions to ask** (in addition to system/configuration):\n"
-        "- **Physics simulation** (`start_backend_job`): if simulation duration has not been stated by the user "
-        "  (e.g. '10 years', '50 years', 'one orbit'), ask 'How many years would you like to run this simulation for?' "
-        "  before calling the tool. Do NOT silently default to `years_hint` or to one planet orbit — always ask first. "
-        "  The only exception: if the user says 'quick run', 'short run', or explicitly says to use the default, "
-        "  you may proceed with one planet orbit and state that clearly in your response.\n"
+        "- **Physics simulation** (`start_backend_job`): before calling this tool you MUST have explicit user "
+        "  confirmation for BOTH:\n"
+        "  1. **Moon configuration** (mm_earth, am_hill, em, moon_retrograde): ALWAYS ask the user to specify "
+        "     or confirm these even if values are on the sliders. Never silently use slider moon values. "
+        "     Ask: 'What moon mass, orbital radius (Hill fraction), eccentricity, and orbit direction (prograde/retrograde) "
+        "     would you like?' Wait for the user's explicit answer before proceeding.\n"
+        "  2. **Simulation duration**: if not stated (e.g. '10 years', '50 years', 'one orbit'), ask "
+        "     'How many years would you like to run this simulation for?' before calling the tool. "
+        "     Do NOT silently default to `years_hint` or to one planet orbit — always ask first. "
+        "     The only exception: if the user says 'quick run', 'short run', or explicitly says to use the default, "
+        "     you may proceed with one planet orbit and state that clearly.\n"
+        "  You may ask both questions in a single message. Do not call `start_backend_job` until the user has "
+        "  answered both. A general 'yes go ahead' does NOT count if moon config was not yet specified.\n"
         "- **Trajectory preview** (`trajectory_preview`): if engine mode or grid size have not been stated "
         "  yet in this conversation, ask about them. Use the exact option names as shown in the web app:\n"
         "  - *Ground Truth Physics Integrator* — exact physics simulation for every cell. "

@@ -94,6 +94,7 @@ export interface TrajPreview {
   cache_key?:      string;
   valid_mm_range?: [number, number] | null;
   valid_am_per_mm?: ([number, number] | null)[];
+  system_params?:  Record<string, number>;  // star+planet params used for this batch
 }
 
 export interface MlPrediction {

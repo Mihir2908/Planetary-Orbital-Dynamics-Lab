@@ -276,6 +276,11 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     // Use the engine mode the chatbot reported (added by Fix B in agent_service.py).
     // Falls back to 'gt_leapfrog' for payloads from before that fix.
     const previewMode = ((trajPreview as unknown) as Record<string, unknown>).mode as string ?? 'gt_leapfrog';
+    // Save the system params the chatbot used for this batch so cell clicks can
+    // restore the correct star/planet sliders (and thus correct HZ in page.tsx).
+    if (trajPreview.system_params) {
+      setBatchSystemParams(trajPreview.system_params as Partial<import('@/lib/types').SystemParams>);
+    }
     // Compute confidence_map client-side when the preview is from HNN and MLP prediction is available
     if (previewMode === 'hnn_hinge4' && mlPrediction) {
       const N_MM = result.mm_grid.length;
@@ -292,7 +297,7 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
     // Switch engine selector to match the pushed result, then show trajectory tab
     setTrajEngine(previewMode as 'gt_leapfrog' | 'hnn_hinge4');
     setPredLayer('trajectory');
-  }, [trajPreview]);
+  }, [trajPreview, setBatchSystemParams]);
 
   // ── Section 3: Model Performance ──────────────────────────────────────────
   const [perfLayer, setPerfLayer] = useState<'mlp' | 'hnn'>('mlp');
