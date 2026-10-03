@@ -727,31 +727,13 @@ export function MlMapOverlay({ onClose, containerRef, onApplyAndRun, frameIndex 
       const frames: TrajectoryFrame[] = data.frames;
       setSelectedCellFrames(frames);
       setPreviewCellFrames(frames, rocheFrac, rhillAULocal);
-
-      // Route frames through trajectoryFrames so useOrbitScene drives animation
-      // — same mechanism as the non-ML "Run" path (external frameIndex, no internal RAF).
-      // Use batchHzRef (captured at batch-request time) not current params — slider state
-      // may have drifted since the batch ran.
-      const tSim   = simYears > 0 ? simYears : (trajEngine === 'hnn_hinge4' ? 10.0 : 1.0);
-      // Preserve backend-authoritative HZ from the most recent simulation.
-      // batchHzRef is used only when no simulation has been run yet.
-      const prevSimMeta = useSimulationStore.getState().simMeta;
-      const batchHz = batchHzRef.current;
-      const meta: SimulationMeta = {
-        dt:         tSim / Math.max(frames.length - 1, 1),
-        t_end:      tSim,
-        a_inner_au: prevSimMeta?.a_inner_au ?? batchHz?.a_inner_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 1.1),
-        a_outer_au: prevSimMeta?.a_outer_au ?? batchHz?.a_outer_au ?? Math.sqrt(params.rs_solar ** 2 * (params.Ts / 5778) ** 4 / 0.5),
-        rhill_AU:   rhillAULocal,
-      };
-      setTrajectoryData(frames, meta);
     } catch (err) {
       console.error('[MlMapOverlay] Cell trajectory fetch failed:', err);
       setCellTrajError('Failed to load trajectory');
     } finally {
       setCellTrajLoading(false);
     }
-  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames, setTrajectoryData]);
+  }, [trajResult, selectedCell, mlPrediction, params, simYears, trajEngine, setMlMassIdx, setPreviewCellFrames]);
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   useEffect(() => {
