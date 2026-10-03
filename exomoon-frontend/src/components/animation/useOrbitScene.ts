@@ -340,19 +340,22 @@ export function useOrbitScene(
           ft === 'fp-star'   ? starRef.current :
           ft === 'fp-planet' ? planetRef.current :
           ft === 'fp-moon'   ? moonRef.current  : null;
-        const closeR =
-          ft === 'fp-star'   ? 0.06 :   // ~1 star visual radius
-          ft === 'fp-planet' ? 0.025 :  // just outside the planet
-                               0.018;   // moon
         if (fpBody) {
+          const baseR =
+            ft === 'fp-star'   ? STAR_BASE_R   :
+            ft === 'fp-planet' ? PLANET_BASE_R :
+                                 MOON_BASE_R;
+          const bodyVisualR = fpBody.scale.x * baseR;
+          const closeR = Math.max(bodyVisualR * 6, 0.003);
+
           const offset = camera.position.clone().sub(fpBody.position);
           const dist   = offset.length();
           if (dist > closeR) {
-            // Zoom in 8% per frame (~1.2 s to close from a typical 5 AU view)
+            // Zoom in 8% per frame — reaches closeR from 5 AU in ~0.6 s at 60 fps
             camera.position.copy(fpBody.position)
               .addScaledVector(offset.normalize(), dist * 0.92);
           } else {
-            fpZoomActiveRef.current = false; // reached target — stop auto-zoom
+            fpZoomActiveRef.current = false; // body fills viewport — stop auto-zoom
           }
         } else {
           fpZoomActiveRef.current = false;
@@ -419,6 +422,18 @@ export function useOrbitScene(
         starR   = Math.max(apEst * STAR_FRAC,   STAR_MIN_R);
         planetR = Math.max(apEst * PLANET_FRAC, PLANET_MIN_R);
         moonR   = Math.max(apEst * MOON_FRAC,   MOON_MIN_R);
+      }
+      // Cap planet/moon visual radii at the estimated Roche limit (= 2.44 × physical
+      // planet radius for equal-density bodies), which is the minimum distance any
+      // moon can stably orbit. Guarantees the planet sphere never envelops the moon.
+      // Falls back to 1.5 % of rhill when bodyRadii is absent (typical rocky estimate).
+      const rocheEstAU =
+        bodyRadii && bodyRadii.planet > 0 ? bodyRadii.planet * 2.44
+        : meta?.rhill_AU                  ? meta.rhill_AU * 0.015
+        : Infinity;
+      if (isFinite(rocheEstAU)) {
+        planetR = Math.min(planetR, rocheEstAU);
+        moonR   = Math.min(moonR,   rocheEstAU * 0.4);
       }
       if (starRef.current)   starRef.current.scale.setScalar(starR   / STAR_BASE_R);
       if (planetRef.current) planetRef.current.scale.setScalar(planetR / PLANET_BASE_R);
