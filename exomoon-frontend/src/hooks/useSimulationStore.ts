@@ -152,6 +152,16 @@ export const useSimulationStore = create<SimulationStore>()(
         jobStatus: 'running',
         jobElapsedSeconds: 0,
         presignedUrls: {},
+        // Clear any cell-preview frames so the new simulation's trajectory shows once complete.
+        // Covers both native UI (handleRun → setJob) and chat (meta event → setJob) paths.
+        previewCellFrames: null,
+        previewRocheFrac: null,
+        previewRhillAU: null,
+        chatCellFrames: null,
+        chatCellRhillAU: null,
+        chatCellRocheFrac: null,
+        chatCellMmEarth: null,
+        chatCellAmHill: null,
       }),
       updateJobStatus: (status, elapsed, urls) => {
         const mapped: JobStatusState =

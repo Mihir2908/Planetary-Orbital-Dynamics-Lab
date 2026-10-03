@@ -679,7 +679,10 @@ def _tool_specs() -> list[dict]:
                 "Pass `params` to override any system parameters the user requested — e.g. if the user says "
                 "'change moon mass to 0.1 and run', pass {\"mm_earth\": 0.1} and the job runs with that value. "
                 "Any key not included in `params` inherits from the current UI configuration. "
-                "Valid keys: Ts, rs_solar, ms_solar, mp_earth, dp_cgs, ap_AU, ep, mm_earth, am_hill, em, moon_retrograde."
+                "Valid keys: Ts, rs_solar, ms_solar, mp_earth, dp_cgs, ap_AU, ep, mm_earth, am_hill, em, moon_retrograde. "
+                "IMPORTANT: Once the job completes, the trajectory appears AUTOMATICALLY in the main 3D orbit canvas "
+                "on the page — the user does NOT need to press Play or take any manual action. "
+                "Never tell the user they need to use the Play button or manually set sliders to see results from a chat-triggered simulation."
             ),
             "input_schema": {
                 "type": "object",
@@ -2593,7 +2596,10 @@ def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
         "or when a capability cannot be triggered directly through tools.\n\n"
         "**Main canvas (centre):** 3D Three.js orbital animation showing the star (yellow/amber), planet (blue), "
         "moon (grey), Hill sphere shell (translucent green) and habitable zone shell. Playback controls sit below the canvas. "
-        "A mini orbit view inset (bottom-left of canvas) shows the moon's path relative to the planet.\n\n"
+        "A mini orbit view inset (bottom-left of canvas) shows the moon's path relative to the planet. "
+        "IMPORTANT: Chat-triggered simulations automatically appear in the main canvas once the job completes — "
+        "the user does NOT need to press Play or use the sliders manually. Never suggest using the Play button "
+        "to see chat-triggered simulation results.\n\n"
         "**Left FAB column (floating buttons, top-left, vertical stack):**\n"
         "  • Star icon → Star parameters panel (stellar temperature, radius, mass)\n"
         "  • Planet icon → Planet parameters panel (planet mass, density, semi-major axis, eccentricity)\n"
