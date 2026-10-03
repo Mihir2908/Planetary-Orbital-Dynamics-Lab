@@ -411,10 +411,17 @@ export function useOrbitScene(
 
       controls.update();
 
-      // Selective bloom: hide star-field, render bloom pass (only solar star glows),
-      // inject bloom texture into mix pass, restore star-field, render full composite.
+      // Selective bloom two-pass:
+      // 1. Render bloom onto a pure-black background (star-field hidden).
+      //    Without the black clear, the scene background colour (~0x050a14) sits in
+      //    the bloom texture and gets additively added a second time in the mix pass,
+      //    doubling the dark background and producing the canvas-wide haze.
+      // 2. Restore everything, render full scene, mix in bloom result.
+      const renderer = rendererRef.current!;
+      renderer.setClearColor(0x000000, 1);
       starFieldMeshesRef.current.forEach(m => { m.visible = false; });
       bloomOnlyComposerRef.current?.render();
+      renderer.setClearColor(0x050a14, 1);
       if (bloomMixPassRef.current && bloomOnlyComposerRef.current) {
         (bloomMixPassRef.current.uniforms as Record<string, THREE.IUniform>).bloomTexture.value =
           bloomOnlyComposerRef.current.readBuffer.texture;
