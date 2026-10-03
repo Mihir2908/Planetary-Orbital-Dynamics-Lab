@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { TrajectoryFrame, SimulationMeta } from '@/lib/types';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
@@ -87,7 +88,9 @@ export function useOrbitScene(
   const frameAzimuthVelRef = useRef(0);
 
   // Focus target ref (used inside RAF closure — not state, no stale closure issue)
-  const focusTargetRef = useRef<FocusTarget>('barycenter');
+  const focusTargetRef  = useRef<FocusTarget>('barycenter');
+  // true for the frames after entering fp-* mode until camera reaches CLOSE_R
+  const fpZoomActiveRef = useRef(false);
 
   const starRef   = useRef<THREE.Mesh | null>(null);
   const planetRef = useRef<THREE.Mesh | null>(null);
@@ -112,7 +115,12 @@ export function useOrbitScene(
   const setFrameIndex      = useCallback((i: number) => { frameIndexRef.current = i; setFrameIndexState(i); }, []);
   const setIsPlaying       = useCallback((v: boolean) => { isPlayingRef.current = v; setIsPlayingState(v); }, []);
   const setSpeedMultiplier = useCallback((v: number) => { speedRef.current = v; setSpeedMultiplierState(v); }, []);
-  const setFocusTarget     = useCallback((t: FocusTarget) => { focusTargetRef.current = t; setFocusTargetState(t); }, []);
+  const setFocusTarget     = useCallback((t: FocusTarget) => {
+    focusTargetRef.current = t;
+    setFocusTargetState(t);
+    // Trigger auto fly-in when entering a lock mode
+    fpZoomActiveRef.current = t.startsWith('fp-');
+  }, []);
 
   // ── ML store state ───────────────────────────────────────────────────────────
   const { mlPrediction, mlMassIdx } = useSimulationStore();
@@ -178,10 +186,14 @@ export function useOrbitScene(
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-      0.6,   // strength — reduced to prevent bloom halo from washing the dark background
-      0.25,  // radius  — tighter glow, star-only halo
-      0.8,   // luminance threshold — only very bright pixels bloom
+      0.6,   // strength
+      0.25,  // radius — tight halo, star only
+      0.8,   // luminance threshold
     ));
+    // OutputPass must be last: applies renderer.outputColorSpace (sRGB) conversion.
+    // Without it, EffectComposer outputs linear values to the canvas and the whole
+    // scene looks washed out / lighter than a direct renderer.render() would.
+    composer.addPass(new OutputPass());
     composerRef.current = composer;
 
     const controls = new OrbitControls(camera, canvas);
@@ -248,6 +260,9 @@ export function useOrbitScene(
         geo,
         new THREE.LineBasicMaterial({ color, opacity: trailOpacities[idx], transparent: true })
       );
+      // Disable frustum culling: bounding sphere is stale when the camera zooms
+      // close to a body and Three.js incorrectly culls the trail lines.
+      line.frustumCulled = false;
       scene.add(line);
       trailRingBufs.current[idx] = ringBuf;
       trailGeomRefs.current[idx] = geo;
@@ -314,6 +329,34 @@ export function useOrbitScene(
         controls.target.x *= 0.95;
         controls.target.y *= 0.95;
         controls.target.z *= 0.95;
+      }
+
+      // ── Auto fly-in when entering a lock mode ────────────────────────────
+      // OrbitControls reads camera.position at the START of update() to derive
+      // its spherical coordinates. Setting camera.position here (before update)
+      // is the correct way to programmatically zoom without accessing internals.
+      if (fpZoomActiveRef.current) {
+        const fpBody =
+          ft === 'fp-star'   ? starRef.current :
+          ft === 'fp-planet' ? planetRef.current :
+          ft === 'fp-moon'   ? moonRef.current  : null;
+        const closeR =
+          ft === 'fp-star'   ? 0.06 :   // ~1 star visual radius
+          ft === 'fp-planet' ? 0.025 :  // just outside the planet
+                               0.018;   // moon
+        if (fpBody) {
+          const offset = camera.position.clone().sub(fpBody.position);
+          const dist   = offset.length();
+          if (dist > closeR) {
+            // Zoom in 8% per frame (~1.2 s to close from a typical 5 AU view)
+            camera.position.copy(fpBody.position)
+              .addScaledVector(offset.normalize(), dist * 0.92);
+          } else {
+            fpZoomActiveRef.current = false; // reached target — stop auto-zoom
+          }
+        } else {
+          fpZoomActiveRef.current = false;
+        }
       }
 
       controls.update();
