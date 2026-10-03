@@ -2,13 +2,17 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { TrajectoryFrame, SimulationMeta } from '@/lib/types';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
 
 // ── Tuning knobs ────────────────────────────────────────────────────────────
-const TRAIL_MAX     = 600;    // max trail points per body in the circular buffer
-const TARGET_FPS    = 60;
+const TRAIL_MAX        = 600;   // max trail points per body in the circular buffer
+const TARGET_FPS       = 60;
+const ORBIT_SPEED_RAD  = 0.08;  // rad/s — auto-rotate speed when not dragging
 
 // Body visual radii expressed as fractions of the planet's semi-major axis.
 const STAR_FRAC     = 0.05;
@@ -26,16 +30,20 @@ const STAR_BASE_R   = 0.06;
 const PLANET_BASE_R = 0.025;
 const MOON_BASE_R   = 0.012;
 
+export type FocusTarget = 'barycenter' | 'planet' | 'moon';
+
 export interface SceneControls {
   frameIndex: number;
   totalFrames: number;
   isPlaying: boolean;
   speedMultiplier: number;
   webGLError: string | null;
+  focusTarget: FocusTarget;
   setFrameIndex: (i: number) => void;
   setIsPlaying: (v: boolean) => void;
   setSpeedMultiplier: (v: number) => void;
   resetCamera: () => void;
+  setFocusTarget: (t: FocusTarget) => void;
 }
 
 export interface BodyRadiiAU {
@@ -54,6 +62,7 @@ export function useOrbitScene(
   const [isPlaying, setIsPlayingState] = useState(false);
   const [speedMultiplier, setSpeedMultiplierState] = useState(1);
   const [webGLError, setWebGLError] = useState<string | null>(null);
+  const [focusTarget, setFocusTargetState] = useState<FocusTarget>('barycenter');
 
   const frameIndexRef = useRef(0);
   const isPlayingRef  = useRef(false);
@@ -61,11 +70,21 @@ export function useOrbitScene(
   const framesRef     = useRef<TrajectoryFrame[] | null>(null);
 
   const rendererRef      = useRef<THREE.WebGLRenderer | null>(null);
+  const composerRef      = useRef<EffectComposer | null>(null);
   const labelRendererRef = useRef<CSS2DRenderer | null>(null);
   const sceneRef         = useRef<THREE.Scene | null>(null);
   const cameraRef        = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef      = useRef<OrbitControls | null>(null);
   const rafRef           = useRef<number | null>(null);
+
+  // Auto-rotate state (Motion.dev-style: constant spin + spring release after drag)
+  const isDraggingRef      = useRef(false);
+  const autoRotVelRef      = useRef(ORBIT_SPEED_RAD);
+  const prevAzimuthRef     = useRef(0);
+  const frameAzimuthVelRef = useRef(0);
+
+  // Focus target ref (used inside RAF closure — not state, no stale closure issue)
+  const focusTargetRef = useRef<FocusTarget>('barycenter');
 
   const starRef   = useRef<THREE.Mesh | null>(null);
   const planetRef = useRef<THREE.Mesh | null>(null);
@@ -90,6 +109,7 @@ export function useOrbitScene(
   const setFrameIndex      = useCallback((i: number) => { frameIndexRef.current = i; setFrameIndexState(i); }, []);
   const setIsPlaying       = useCallback((v: boolean) => { isPlayingRef.current = v; setIsPlayingState(v); }, []);
   const setSpeedMultiplier = useCallback((v: number) => { speedRef.current = v; setSpeedMultiplierState(v); }, []);
+  const setFocusTarget     = useCallback((t: FocusTarget) => { focusTargetRef.current = t; setFocusTargetState(t); }, []);
 
   // ── ML store state ───────────────────────────────────────────────────────────
   const { mlPrediction, mlMassIdx } = useSimulationStore();
@@ -132,16 +152,34 @@ export function useOrbitScene(
     scene.add(dirLight);
     sceneRef.current = scene;
 
-    // Background stars
-    const starGeo = new THREE.BufferGeometry();
-    const starPositions = new Float32Array(6000);
-    for (let i = 0; i < 6000; i++) starPositions[i] = (Math.random() - 0.5) * 200;
-    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-    scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.08 })));
+    // Enhanced starfield — 3 spectral layers at pixel-space size (sizeAttenuation: false)
+    // so stars stay crisp at all zoom levels without scaling with the scene.
+    const mkStarField = (n: number, color: number, size: number) => {
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(n * 3);
+      for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 400;
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: false })));
+    };
+    mkStarField(2000, 0xffffff, 1.8);  // bright white — prominent stars
+    mkStarField(3000, 0xadd8ff, 1.2);  // blue-white — mid-brightness
+    mkStarField(5000, 0x9999bb, 0.8);  // cool dim — faint background
 
     const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.0001, 500);
     camera.position.set(0, 3, 6);
     cameraRef.current = camera;
+
+    // EffectComposer + UnrealBloom — star's high emissiveIntensity (3.0) crosses the
+    // luminance threshold (0.75); planets/moon stay at 0.3 so they do NOT bloom.
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    composer.addPass(new UnrealBloomPass(
+      new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
+      1.0,   // strength
+      0.5,   // radius
+      0.75,  // luminance threshold
+    ));
+    composerRef.current = composer;
 
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
@@ -149,6 +187,23 @@ export function useOrbitScene(
     controls.minDistance = 0.001;
     controls.maxDistance = 200;
     controlsRef.current = controls;
+
+    // Motion.dev-style auto-rotate: constant spin with spring-decay after drag release.
+    // Drag velocity is measured as azimuthal angle delta per frame, handed to autoRotVel
+    // so the scene continues in the drag direction and decays back to ORBIT_SPEED_RAD.
+    autoRotVelRef.current  = ORBIT_SPEED_RAD;
+    prevAzimuthRef.current = controls.getAzimuthalAngle();
+    isDraggingRef.current  = false;
+
+    const onPD = () => { isDraggingRef.current = true; };
+    const onPU = () => {
+      if (!isDraggingRef.current) return;
+      isDraggingRef.current = false;
+      const v = Math.max(-2.4, Math.min(2.4, frameAzimuthVelRef.current));
+      autoRotVelRef.current = v !== 0 ? v : ORBIT_SPEED_RAD;
+    };
+    canvas.addEventListener('pointerdown', onPD);
+    canvas.addEventListener('pointerup',   onPU);
 
     const mkSphere = (r: number, color: number) => {
       const m = new THREE.Mesh(
@@ -159,6 +214,8 @@ export function useOrbitScene(
       return m;
     };
     starRef.current   = mkSphere(STAR_BASE_R,   0xFFDD00);
+    // High emissive so the star exceeds the bloom luminance threshold (planets stay at 0.3)
+    (starRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity = 3.0;
     planetRef.current = mkSphere(PLANET_BASE_R, 0x4488FF);
     moonRef.current   = mkSphere(MOON_BASE_R,   0xFF5555);
 
@@ -202,6 +259,7 @@ export function useOrbitScene(
       const h = canvas.clientHeight;
       renderer.setSize(w, h, false);
       labelRenderer.setSize(w, h);
+      composerRef.current?.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     });
@@ -226,8 +284,35 @@ export function useOrbitScene(
         updateScene(Math.floor(frameIndexRef.current));
       }
 
+      // ── Motion.dev-style auto-rotate with spring-decay after drag release ────
+      const seconds = Math.min(delta / 1000, 0.05);
+      const az = controls.getAzimuthalAngle();
+      let dAz = az - prevAzimuthRef.current;
+      if (dAz >  Math.PI) dAz -= Math.PI * 2;
+      if (dAz < -Math.PI) dAz += Math.PI * 2;
+      frameAzimuthVelRef.current = dAz / Math.max(seconds, 0.001);
+      prevAzimuthRef.current = az;
+
+      if (!isDraggingRef.current) {
+        // Exponential spring: velocity decays back toward ORBIT_SPEED_RAD each frame
+        autoRotVelRef.current += (ORBIT_SPEED_RAD - autoRotVelRef.current) * 0.025;
+        controls.rotateLeft(-autoRotVelRef.current * seconds);
+      }
+
+      // ── Focus target — orbit camera around selected body ──────────────────
+      if (focusTargetRef.current === 'planet' && planetRef.current) {
+        controls.target.lerp(planetRef.current.position, 0.1);
+      } else if (focusTargetRef.current === 'moon' && moonRef.current) {
+        controls.target.lerp(moonRef.current.position, 0.1);
+      } else {
+        // Drift back to barycenter (0,0,0)
+        controls.target.x *= 0.95;
+        controls.target.y *= 0.95;
+        controls.target.z *= 0.95;
+      }
+
       controls.update();
-      renderer.render(scene, camera);
+      composerRef.current?.render();
       labelRenderer.render(scene, camera);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -237,6 +322,10 @@ export function useOrbitScene(
       ro.disconnect();
       controls.dispose();
       renderer.dispose();
+      composerRef.current?.dispose();
+      composerRef.current = null;
+      canvas.removeEventListener('pointerdown', onPD);
+      canvas.removeEventListener('pointerup',   onPU);
       labelRenderer.domElement.remove();
     };
   }, [canvasRef]);
@@ -502,9 +591,11 @@ export function useOrbitScene(
     isPlaying,
     speedMultiplier,
     webGLError,
+    focusTarget,
     setFrameIndex,
     setIsPlaying,
     setSpeedMultiplier,
     resetCamera: () => { controlsRef.current?.reset(); },
+    setFocusTarget,
   };
 }
