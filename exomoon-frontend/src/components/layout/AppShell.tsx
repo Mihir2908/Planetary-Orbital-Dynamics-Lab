@@ -1,6 +1,8 @@
 'use client';
 import React, { useState } from 'react';
 import { MessageSquare } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { NoiseBackground } from '@/components/ui/noise-background';
 import { cn } from '@/lib/utils';
 
 interface AppShellProps {
@@ -18,16 +20,17 @@ export function AppShell({ main, chat }: AppShellProps) {
         {main}
       </main>
 
-      {/* Chat drawer — slides in from right */}
-      <div
-        className={cn(
-          'fixed top-0 right-0 h-full w-96 bg-gray-900 border-l border-gray-800 shadow-2xl z-50',
-          'flex flex-col transition-transform duration-300 ease-in-out',
-          chatOpen ? 'translate-x-0' : 'translate-x-full'
-        )}
+      {/* Chat drawer — framer-motion slide from right; always mounted to preserve chat state */}
+      <motion.div
+        initial={false}
+        animate={{ x: chatOpen ? 0 : '100%' }}
+        transition={{ type: 'spring', damping: 32, stiffness: 280, mass: 0.8 }}
+        className="fixed top-0 right-0 h-full w-96 border-l border-gray-800 shadow-2xl z-50 flex flex-col bg-gray-900"
       >
-        {chat}
-      </div>
+        <NoiseBackground className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {chat}
+        </NoiseBackground>
+      </motion.div>
 
       {/* Chat toggle FAB */}
       <button

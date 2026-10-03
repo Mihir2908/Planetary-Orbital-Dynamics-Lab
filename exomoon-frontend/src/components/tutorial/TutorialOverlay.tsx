@@ -1,5 +1,7 @@
 'use client';
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { GlowingEffect } from '@/components/ui/glowing-effect';
 
 interface TutorialStep {
   title: string;
@@ -248,9 +250,12 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
       <div
         data-tutorial-card
         style={{ ...cardStyle, pointerEvents: 'auto' }}
-        className="bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-4"
+        className="relative bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-4 overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
+        {/* Glowing border — mouse-following conic gradient arc */}
+        <GlowingEffect spread={30} glow={true} disabled={false} proximity={64} inactiveZone={0.01} />
+
         {/* Header row */}
         <div className="flex items-center justify-between gap-2">
           {/* Drag grip */}
@@ -290,11 +295,19 @@ export function TutorialOverlay({ onClose, simReady, startStep = 0 }: TutorialOv
           </div>
         </div>
 
-        {/* Content */}
-        <div>
-          <h3 className="text-sm font-semibold text-white mb-1.5">{s.title}</h3>
-          <p className="text-xs text-gray-400 leading-relaxed">{s.body}</p>
-        </div>
+        {/* Content — animated on step change */}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={step}
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -5 }}
+            transition={{ duration: 0.13 }}
+          >
+            <h3 className="text-sm font-semibold text-white mb-1.5">{s.title}</h3>
+            <p className="text-xs text-gray-400 leading-relaxed">{s.body}</p>
+          </motion.div>
+        </AnimatePresence>
 
         {/* Progress bar */}
         <div className="w-full h-0.5 bg-gray-800 rounded-full overflow-hidden">

@@ -25,3 +25,20 @@ html, body {
 input[type="range"] {
   accent-color: #2563eb;
 }
+
+/* ── Custom animations ──────────────────────────────────────────────────── */
+@theme {
+  --animate-aurora: aurora 9s linear infinite;
+  --animate-glow-pulse: glow-pulse 3.5s ease-in-out infinite;
+}
+
+@keyframes aurora {
+  0%   { background-position: 0%   50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0%   50%; }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 1;    }
+}

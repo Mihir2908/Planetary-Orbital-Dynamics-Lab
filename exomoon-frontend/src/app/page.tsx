@@ -4,6 +4,11 @@ import {
   BarChart2, X, GripHorizontal, Sun, Globe, Moon,
   CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain, HelpCircle, Info,
 } from 'lucide-react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { AuroraLayer }    from '@/components/ui/aurora-layer';
+import { GlowingEffect }  from '@/components/ui/glowing-effect';
+import { SpotlightNew }   from '@/components/ui/spotlight-new';
+import { MovingBorder }   from '@/components/ui/moving-border';
 import dynamic from 'next/dynamic';
 const TutorialOverlay = dynamic(
   () => import('@/components/tutorial/TutorialOverlay').then(m => ({ default: m.TutorialOverlay })),
@@ -159,6 +164,8 @@ function ObjectOverlayShell({
         ...(panelWidth ? { width: panelWidth }                    : {}),
       }}
     >
+      {/* Glowing border — mouse-following conic gradient arc */}
+      <GlowingEffect spread={30} glow={true} disabled={false} proximity={64} inactiveZone={0.01} />
       <div
         onMouseDown={handleDragStart}
         className={cn(
@@ -180,6 +187,9 @@ function ObjectOverlayShell({
         </div>
       </div>
       <div className="relative flex-1 min-h-0 overflow-auto">
+        {/* Aurora + Spotlight background layers */}
+        <AuroraLayer opacity={0.13} />
+        <SpotlightNew />
         {children}
         <div onMouseDown={handleResizeStart}
           className="absolute top-0 right-0 bottom-0 w-1 cursor-ew-resize hover:bg-white/10 transition-colors"
@@ -259,6 +269,7 @@ const EdaOverlay = memo(function EdaOverlay({ onClose, containerRef }: ObjectOve
       )}
       style={dragPos ? { left: dragPos.left, top: dragPos.top } : undefined}
     >
+      <GlowingEffect spread={30} glow={true} disabled={false} proximity={64} inactiveZone={0.01} />
       <div onMouseDown={handleDragStart}
         className="flex items-center justify-between px-3 py-1.5 border-b border-gray-700/40 shrink-0
                    cursor-grab active:cursor-grabbing select-none"
@@ -540,19 +551,20 @@ export default function HomePage() {
                     )}
                   />
                   <span className="text-xs text-gray-600 shrink-0">(0=1 orbit)</span>
-                  <button
+                  <MovingBorder
                     id="tutorial-run-btn"
                     onClick={handleRun}
                     disabled={isRunning}
+                    containerClassName="ml-auto"
                     className={cn(
-                      'ml-auto flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium transition-colors',
+                      'flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium transition-colors',
                       'bg-blue-600 hover:bg-blue-500 text-white',
                       isRunning && 'opacity-50 cursor-not-allowed'
                     )}
                   >
                     {isRunning ? <Loader2 size={10} className="animate-spin" /> : '▶'}
                     {isRunning ? 'Running' : 'Run'}
-                  </button>
+                  </MovingBorder>
                 </div>
 
                 {/* Status message */}
@@ -651,19 +663,69 @@ export default function HomePage() {
             </button>
           </div>
 
-          {/* Object parameter overlays */}
-          {showStar   && <StellarOverlay onClose={handleCloseStar}   containerRef={containerRef} />}
-          {showPlanet && <PlanetOverlay  onClose={handleClosePlanet} containerRef={containerRef} />}
-          {showMoon   && <MoonOverlay    onClose={handleCloseMoon}   containerRef={containerRef} />}
-          {showEda    && <EdaOverlay     onClose={handleCloseEda}    containerRef={containerRef} />}
-          {showMl     && (
-            <MlMapOverlay
-              onClose={handleCloseMl}
-              containerRef={containerRef}
-              onApplyAndRun={handleRun}
-              frameIndex={sceneControls.frameIndex}
-            />
-          )}
+          {/* Object parameter overlays — AnimatePresence for entry/exit */}
+          <AnimatePresence>
+            {showStar && (
+              <motion.div key="star-overlay"
+                initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                transition={{ duration: 0.14 }}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+              >
+                <StellarOverlay onClose={handleCloseStar} containerRef={containerRef} />
+              </motion.div>
+            )}
+            {showPlanet && (
+              <motion.div key="planet-overlay"
+                initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                transition={{ duration: 0.14 }}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+              >
+                <PlanetOverlay onClose={handleClosePlanet} containerRef={containerRef} />
+              </motion.div>
+            )}
+            {showMoon && (
+              <motion.div key="moon-overlay"
+                initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                transition={{ duration: 0.14 }}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+              >
+                <MoonOverlay onClose={handleCloseMoon} containerRef={containerRef} />
+              </motion.div>
+            )}
+            {showEda && (
+              <motion.div key="eda-overlay"
+                initial={{ opacity: 0, scale: 0.97, y: -4 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.97, y: -4 }}
+                transition={{ duration: 0.14 }}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+              >
+                <EdaOverlay onClose={handleCloseEda} containerRef={containerRef} />
+              </motion.div>
+            )}
+            {showMl && (
+              <motion.div key="ml-overlay"
+                initial={{ opacity: 0, scale: 0.97, y: -4 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.97, y: -4 }}
+                transition={{ duration: 0.14 }}
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+              >
+                <MlMapOverlay
+                  onClose={handleCloseMl}
+                  containerRef={containerRef}
+                  onApplyAndRun={handleRun}
+                  frameIndex={sceneControls.frameIndex}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Fullscreen enter button — bottom-left */}
           <button
