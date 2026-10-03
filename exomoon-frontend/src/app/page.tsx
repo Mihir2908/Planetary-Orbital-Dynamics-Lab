@@ -785,7 +785,7 @@ export default function HomePage() {
             : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60',
         );
         return (
-          <div className="absolute bottom-14 left-3 z-20 flex flex-col gap-1">
+          <div id="tutorial-view-buttons" className="absolute bottom-14 left-3 z-20 flex flex-col gap-1">
             <div className="flex gap-1">
               {ORBIT_BTNS.map(({ key, icon, title, color }) => (
                 <button key={key} onClick={() => sceneControls.setFocusTarget(key)}
@@ -872,7 +872,7 @@ export default function HomePage() {
       {/* Tutorial FAB — ? button above chatbot FAB */}
       <button
         onClick={() => { setTutorialStartStep(0); setTutorialOpen(true); }}
-        className="fixed bottom-[344px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
+        className="fixed bottom-[296px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
                    flex items-center justify-center transition-colors
                    bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
         title="Open tutorial"

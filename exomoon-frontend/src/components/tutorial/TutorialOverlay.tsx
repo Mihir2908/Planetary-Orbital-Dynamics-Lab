@@ -78,6 +78,13 @@ const STEPS: TutorialStep[] = [
     requiresSim: true,
   },
   {
+    title: 'Camera Views',
+    body: 'Six buttons in the bottom-left let you change the camera perspective. Top row (Orbit): the camera smoothly follows the star ☀, planet ⬤, or moon ◦ as it orbits — the default is star-centred. Bottom row (Lock ⊙ ⊕ ⊗): the camera snaps hard to a body every frame; scroll in close for a first-person ride-along view from that body\'s perspective.',
+    targetId: 'tutorial-view-buttons',
+    cardSide: 'right',
+    requiresSim: true,
+  },
+  {
     title: 'EDA — Exploratory Data Analysis',
     body: 'Click EDA to open time-series plots of moon-planet distance, orbital speeds, and more. Useful for identifying escape events or studying the quantitative dynamics of your simulated system.',
     targetId: 'tutorial-eda-fab',
