@@ -702,36 +702,48 @@ export default function HomePage() {
       )}
 
       {/* ── Always-visible: focus target toggle + MiniOrbitView + playback ─── */}
-      {/* Camera focus — orbit around star (default), planet, or moon.          */}
-      {/* Only shown when there are frames to display.                          */}
-      {sceneControls.totalFrames > 0 && (
-        <div className="absolute bottom-3 right-3 z-20 flex gap-1">
-          {([
-            { key: 'barycenter' as FocusTarget, icon: '☀', label: 'star'   },
-            { key: 'planet'     as FocusTarget, icon: '⬤', label: 'planet' },
-            { key: 'moon'       as FocusTarget, icon: '◦', label: 'moon'   },
-          ]).map(({ key, icon, label }) => {
-            const isActive = sceneControls.focusTarget === key;
-            const activeStyle =
-              key === 'barycenter' ? 'bg-yellow-900/60 text-yellow-300 border-yellow-600/60' :
-              key === 'planet'     ? 'bg-blue-900/60 text-blue-300 border-blue-600/60' :
-                                     'bg-red-900/60 text-red-300 border-red-600/60';
-            return (
-              <button
-                key={key}
-                onClick={() => sceneControls.setFocusTarget(key)}
-                title={`Orbit ${label}`}
-                className={cn(
-                  'w-7 h-7 flex items-center justify-center rounded text-sm border transition-colors bg-black/50 border-gray-700/50',
-                  isActive ? activeStyle : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60',
-                )}
-              >
-                {icon}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {/* Row 1 — Orbit: smooth-follow lerp around body                         */}
+      {/* Row 2 — Lock: hard-snap each frame; scroll in for first-person view   */}
+      {sceneControls.totalFrames > 0 && (() => {
+        const ORBIT_BTNS: { key: FocusTarget; icon: string; title: string; color: string }[] = [
+          { key: 'barycenter', icon: '☀', title: 'Orbit: star (default)', color: 'yellow' },
+          { key: 'planet',     icon: '⬤', title: 'Orbit: planet',         color: 'blue'   },
+          { key: 'moon',       icon: '◦', title: 'Orbit: moon',           color: 'red'    },
+        ];
+        const LOCK_BTNS: { key: FocusTarget; icon: string; title: string; color: string }[] = [
+          { key: 'fp-star',   icon: '⊙', title: 'Lock to star — scroll in for first-person',   color: 'yellow' },
+          { key: 'fp-planet', icon: '⊕', title: 'Lock to planet — scroll in for first-person', color: 'blue'   },
+          { key: 'fp-moon',   icon: '⊗', title: 'Lock to moon — scroll in for first-person',   color: 'red'    },
+        ];
+        const btnCls = (active: boolean, color: string) => cn(
+          'w-7 h-7 flex items-center justify-center rounded text-sm border transition-colors bg-black/50 border-gray-700/50',
+          active
+            ? color === 'yellow' ? 'bg-yellow-900/60 text-yellow-300 border-yellow-600/60'
+            : color === 'blue'   ? 'bg-blue-900/60 text-blue-300 border-blue-600/60'
+            :                      'bg-red-900/60 text-red-300 border-red-600/60'
+            : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60',
+        );
+        return (
+          <div className="absolute bottom-3 right-3 z-20 flex flex-col gap-1">
+            <div className="flex gap-1">
+              {ORBIT_BTNS.map(({ key, icon, title, color }) => (
+                <button key={key} onClick={() => sceneControls.setFocusTarget(key)}
+                  title={title} className={btnCls(sceneControls.focusTarget === key, color)}>
+                  {icon}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {LOCK_BTNS.map(({ key, icon, title, color }) => (
+                <button key={key} onClick={() => sceneControls.setFocusTarget(key)}
+                  title={title} className={btnCls(sceneControls.focusTarget === key, color)}>
+                  {icon}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       <MiniOrbitView
         id="tutorial-mini-orbit"

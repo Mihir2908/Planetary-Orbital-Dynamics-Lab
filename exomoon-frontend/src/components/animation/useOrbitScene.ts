@@ -30,7 +30,10 @@ const STAR_BASE_R   = 0.06;
 const PLANET_BASE_R = 0.025;
 const MOON_BASE_R   = 0.012;
 
-export type FocusTarget = 'barycenter' | 'planet' | 'moon';
+export type FocusTarget =
+  | 'barycenter'
+  | 'planet' | 'moon'
+  | 'fp-star' | 'fp-planet' | 'fp-moon';  // hard-lock (no lerp) — zoom in for first-person
 
 export interface SceneControls {
   frameIndex: number;
@@ -175,9 +178,9 @@ export function useOrbitScene(
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(new UnrealBloomPass(
       new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-      1.0,   // strength
-      0.5,   // radius
-      0.75,  // luminance threshold
+      0.6,   // strength — reduced to prevent bloom halo from washing the dark background
+      0.25,  // radius  — tighter glow, star-only halo
+      0.8,   // luminance threshold — only very bright pixels bloom
     ));
     composerRef.current = composer;
 
@@ -299,13 +302,15 @@ export function useOrbitScene(
         controls.rotateLeft(-autoRotVelRef.current * seconds);
       }
 
-      // ── Focus target — orbit camera around selected body ──────────────────
-      if (focusTargetRef.current === 'planet' && planetRef.current) {
-        controls.target.lerp(planetRef.current.position, 0.1);
-      } else if (focusTargetRef.current === 'moon' && moonRef.current) {
-        controls.target.lerp(moonRef.current.position, 0.1);
-      } else {
-        // Drift back to barycenter (0,0,0)
+      // ── Focus target — orbit (lerp) or lock (hard-snap) to body ─────────
+      const ft = focusTargetRef.current;
+      if      (ft === 'planet'    && planetRef.current) controls.target.lerp(planetRef.current.position, 0.1);
+      else if (ft === 'moon'      && moonRef.current)   controls.target.lerp(moonRef.current.position,   0.1);
+      else if (ft === 'fp-star'   && starRef.current)   controls.target.copy(starRef.current.position);
+      else if (ft === 'fp-planet' && planetRef.current) controls.target.copy(planetRef.current.position);
+      else if (ft === 'fp-moon'   && moonRef.current)   controls.target.copy(moonRef.current.position);
+      else {
+        // barycenter — drift back to origin
         controls.target.x *= 0.95;
         controls.target.y *= 0.95;
         controls.target.z *= 0.95;
