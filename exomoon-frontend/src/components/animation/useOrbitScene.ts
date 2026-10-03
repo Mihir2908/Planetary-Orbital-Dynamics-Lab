@@ -6,6 +6,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { TrajectoryFrame, SimulationMeta } from '@/lib/types';
 import { useSimulationStore } from '@/hooks/useSimulationStore';
@@ -73,9 +74,12 @@ export function useOrbitScene(
   const speedRef      = useRef(1);
   const framesRef     = useRef<TrajectoryFrame[] | null>(null);
 
-  const rendererRef      = useRef<THREE.WebGLRenderer | null>(null);
-  const composerRef      = useRef<EffectComposer | null>(null);
-  const labelRendererRef = useRef<CSS2DRenderer | null>(null);
+  const rendererRef         = useRef<THREE.WebGLRenderer | null>(null);
+  const composerRef         = useRef<EffectComposer | null>(null);  // final composite → screen
+  const bloomOnlyComposerRef = useRef<EffectComposer | null>(null); // star-only bloom → offscreen RT
+  const bloomMixPassRef     = useRef<ShaderPass | null>(null);      // injects bloom RT into final pass
+  const starFieldMeshesRef  = useRef<THREE.Points[]>([]);           // hidden during bloom pass
+  const labelRendererRef    = useRef<CSS2DRenderer | null>(null);
   const sceneRef         = useRef<THREE.Scene | null>(null);
   const cameraRef        = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef      = useRef<OrbitControls | null>(null);
@@ -165,36 +169,78 @@ export function useOrbitScene(
 
     // Enhanced starfield — 3 spectral layers at pixel-space size (sizeAttenuation: false)
     // so stars stay crisp at all zoom levels without scaling with the scene.
-    const mkStarField = (n: number, color: number, size: number) => {
+    // Saved to starFieldMeshesRef so the selective-bloom pass can hide them.
+    const mkStarField = (n: number, color: number, size: number): THREE.Points => {
       const geo = new THREE.BufferGeometry();
       const pos = new Float32Array(n * 3);
       for (let i = 0; i < n * 3; i++) pos[i] = (Math.random() - 0.5) * 400;
       geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: false })));
+      const pts = new THREE.Points(geo, new THREE.PointsMaterial({ color, size, sizeAttenuation: false }));
+      scene.add(pts);
+      return pts;
     };
-    mkStarField(2000, 0xffffff, 1.8);  // bright white — prominent stars
-    mkStarField(3000, 0xadd8ff, 1.2);  // blue-white — mid-brightness
-    mkStarField(5000, 0x9999bb, 0.8);  // cool dim — faint background
+    starFieldMeshesRef.current = [
+      mkStarField(2000, 0xffffff, 1.8),  // bright white
+      mkStarField(3000, 0xadd8ff, 1.2),  // blue-white
+      mkStarField(5000, 0x9999bb, 0.8),  // cool dim
+    ];
 
     const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.0001, 500);
     camera.position.set(0, 3, 6);
     cameraRef.current = camera;
 
-    // EffectComposer + UnrealBloom — star's high emissiveIntensity (3.0) crosses the
-    // luminance threshold (0.75); planets/moon stay at 0.3 so they do NOT bloom.
-    const composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    composer.addPass(new UnrealBloomPass(
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    // ── Selective bloom — two-composer pipeline ─────────────────────────────
+    // Problem: UnrealBloomPass downsamples to 1/32 before upsampling; 2000 bright
+    // white star-field points scattered across the frame bleed into that low-res
+    // pyramid and produce a uniform canvas-wide haze.
+    // Solution: bloom-only composer runs with star-field hidden (only the solar star
+    // contributes); final composer renders the full scene and additively blends the
+    // bloom result on top. Star-field appears at full brightness — it just never
+    // feeds the bloom pyramid.
+
+    // 1. Bloom-only composer (star only → bloom → offscreen render target)
+    const bloomOnlyComposer = new EffectComposer(renderer);
+    bloomOnlyComposer.renderToScreen = false;
+    bloomOnlyComposer.addPass(new RenderPass(scene, camera));
+    bloomOnlyComposer.addPass(new UnrealBloomPass(
       new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-      0.6,   // strength
-      0.25,  // radius — tight halo, star only
+      0.6,   // strength — kept at original approved value
+      0.25,  // radius
       0.8,   // luminance threshold
     ));
-    // OutputPass must be last: applies renderer.outputColorSpace (sRGB) conversion.
-    // Without it, EffectComposer outputs linear values to the canvas and the whole
-    // scene looks washed out / lighter than a direct renderer.render() would.
-    composer.addPass(new OutputPass());
-    composerRef.current = composer;
+    bloomOnlyComposerRef.current = bloomOnlyComposer;
+
+    // 2. Final composer: full scene + additive bloom overlay + sRGB correction
+    const bloomMixShader = new THREE.ShaderMaterial({
+      uniforms: {
+        baseTexture:  { value: null },
+        bloomTexture: { value: null },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+      `,
+      fragmentShader: `
+        uniform sampler2D baseTexture;
+        uniform sampler2D bloomTexture;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(baseTexture, vUv)
+                       + vec4(texture2D(bloomTexture, vUv).rgb, 0.0);
+        }
+      `,
+    });
+    const mixPass = new ShaderPass(bloomMixShader, 'baseTexture');
+    mixPass.needsSwap = true;
+    bloomMixPassRef.current = mixPass;
+
+    const finalComposer = new EffectComposer(renderer);
+    finalComposer.addPass(new RenderPass(scene, camera));
+    finalComposer.addPass(mixPass);
+    finalComposer.addPass(new OutputPass());
+    composerRef.current = finalComposer;
 
     const controls = new OrbitControls(camera, canvas);
     controls.enableDamping = true;
@@ -277,6 +323,7 @@ export function useOrbitScene(
       const h = canvas.clientHeight;
       renderer.setSize(w, h, false);
       labelRenderer.setSize(w, h);
+      bloomOnlyComposerRef.current?.setSize(w, h);
       composerRef.current?.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -363,7 +410,18 @@ export function useOrbitScene(
       }
 
       controls.update();
+
+      // Selective bloom: hide star-field, render bloom pass (only solar star glows),
+      // inject bloom texture into mix pass, restore star-field, render full composite.
+      starFieldMeshesRef.current.forEach(m => { m.visible = false; });
+      bloomOnlyComposerRef.current?.render();
+      if (bloomMixPassRef.current && bloomOnlyComposerRef.current) {
+        (bloomMixPassRef.current.uniforms as Record<string, THREE.IUniform>).bloomTexture.value =
+          bloomOnlyComposerRef.current.readBuffer.texture;
+      }
+      starFieldMeshesRef.current.forEach(m => { m.visible = true; });
       composerRef.current?.render();
+
       labelRenderer.render(scene, camera);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -373,6 +431,8 @@ export function useOrbitScene(
       ro.disconnect();
       controls.dispose();
       renderer.dispose();
+      bloomOnlyComposerRef.current?.dispose();
+      bloomOnlyComposerRef.current = null;
       composerRef.current?.dispose();
       composerRef.current = null;
       canvas.removeEventListener('pointerdown', onPD);
