@@ -1,902 +1,119 @@
 'use client';
-import React, { useRef, useState, useCallback, useEffect, useMemo, memo } from 'react';
-import {
-  BarChart2, X, GripHorizontal, Sun, Globe, Moon,
-  CheckCircle, Zap, Loader2, ChevronDown, ChevronUp, Maximize2, Brain, HelpCircle, Info,
-} from 'lucide-react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { AuroraLayer }    from '@/components/ui/aurora-layer';
-import { GlowingEffect }  from '@/components/ui/glowing-effect';
-import { SpotlightNew }   from '@/components/ui/spotlight-new';
-import { MovingBorder }   from '@/components/ui/moving-border';
-import dynamic from 'next/dynamic';
-const TutorialOverlay = dynamic(
-  () => import('@/components/tutorial/TutorialOverlay').then(m => ({ default: m.TutorialOverlay })),
-  { ssr: false }
-);
-import { AppShell } from '@/components/layout/AppShell';
-import { OrbitCanvas } from '@/components/animation/OrbitCanvas';
-import { OrbitOverlay } from '@/components/animation/OrbitOverlay';
-import { AnimationControls } from '@/components/animation/AnimationControls';
-import { MiniOrbitView } from '@/components/animation/MiniOrbitView';
-import { useOrbitScene } from '@/components/animation/useOrbitScene';
-import type { BodyRadiiAU, FocusTarget } from '@/components/animation/useOrbitScene';
-import { EdaPanel } from '@/components/eda/EdaPanel';
-import { MlMapOverlay } from '@/components/ml/MlMapOverlay';
-import { ChatPanel } from '@/components/chat/ChatPanel';
-import { StellarPanel } from '@/components/controls/StellarPanel';
-import { PlanetPanel } from '@/components/controls/PlanetPanel';
-import { MoonPanel } from '@/components/controls/MoonPanel';
-import { NasaSearch } from '@/components/controls/NasaSearch';
-import { useSimulationStore } from '@/hooks/useSimulationStore';
-import { useJobPoller } from '@/hooks/useJobPoller';
-import { agentApi, paramsToAgentFormat } from '@/lib/agentApi';
-import { bodyRadiusAU } from '@/lib/trajectoryMath';
-import { cn } from '@/lib/utils';
-import type { ParamStatus } from '@/hooks/useSimulationStore';
-import type { TrajectoryFrame, SimulationMeta } from '@/lib/types';
 
-const RSUN_AU = 6.9598e8 / 1.495979e11;
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { OrbitalHeroSection, type Planet } from '@/components/ui/orbital-hero-section';
 
-// ── Stability + habitability badges (used in fullscreen mode) ────────────────
-function FullscreenBadges({
-  frame, meta,
-}: { frame: TrajectoryFrame; meta: SimulationMeta }) {
-  const moonPlanetDist = frame.moon_planet_dist ?? 0;
-  const rhill = meta.rhill_AU ?? 0;
-  const escaped = rhill > 0 && moonPlanetDist > rhill;
-  const dx = frame.moon_x - frame.star_x;
-  const dy = frame.moon_y - frame.star_y;
-  const dz = frame.moon_z - frame.star_z;
-  const moonStarDist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  const inHZ = moonStarDist >= meta.a_inner_au && moonStarDist <= meta.a_outer_au;
+function useNarrow(query = '(max-width: 767px)') {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const m = window.matchMedia(query);
+    const sync = () => setNarrow(m.matches);
+    sync();
+    m.addEventListener('change', sync);
+    return () => m.removeEventListener('change', sync);
+  }, [query]);
+  return narrow;
+}
+
+// Two-body system: a planet (blue) and a moon (red) orbiting the central star.
+// All six Keplerian elements are set so the two bodies have clearly distinct
+// orbit planes and periods — the helical trails read as two separate paths
+// rather than one messy tangle.
+const EXOMOON_SYSTEM: Planet[] = [
+  {
+    name: 'Planet',
+    a: 1.0,  e: 0.08, i: 2.5,
+    node: 60, peri: 100, M0: 150,
+    color: '#4488FF', size: 5.0, glow: 1.3,
+  },
+  {
+    name: 'Moon',
+    a: 0.45, e: 0.07, i: 6.5,
+    node: 195, peri: 260, M0: 45,
+    color: '#FF5555', size: 3.2, glow: 1.1,
+  },
+];
+
+export default function LandingPage() {
+  const narrow = useNarrow();
 
   return (
-    <div className="absolute top-3 left-3 z-10 space-y-1.5 pointer-events-none">
-      <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
-        escaped
-          ? 'bg-red-900/70 text-red-300 border border-red-700/50'
-          : 'bg-green-900/70 text-green-300 border border-green-700/50'
-      }`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${escaped ? 'bg-red-400' : 'bg-green-400'}`} />
-        {escaped ? 'Moon Escaped' : 'Stable'}
-      </div>
-      <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold tracking-wide ${
-        inHZ
-          ? 'bg-emerald-900/70 text-emerald-300 border border-emerald-700/50'
-          : 'bg-orange-900/70 text-orange-300 border border-orange-700/50'
-      }`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${inHZ ? 'bg-emerald-400' : 'bg-orange-400'}`} />
-        {inHZ ? 'Habitable' : 'Uninhabitable'}
-      </div>
-    </div>
-  );
-}
-
-// ── Shared overlay props ─────────────────────────────────────────────────────
-interface ObjectOverlayBaseProps {
-  onClose: () => void;
-  containerRef: React.RefObject<HTMLDivElement | null>;
-}
-
-// ── Reusable drag+resize logic ───────────────────────────────────────────────
-function useDraggableResizable(containerRef: React.RefObject<HTMLDivElement | null>) {
-  const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null);
-  const [panelWidth, setPanelWidth] = useState<number | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const panel = panelRef.current;
-    const container = containerRef.current;
-    if (!panel || !container) return;
-    const pr = panel.getBoundingClientRect();
-    const ox = e.clientX - pr.left;
-    const oy = e.clientY - pr.top;
-    function onMove(ev: MouseEvent) {
-      const cr = containerRef.current?.getBoundingClientRect();
-      const pr2 = panelRef.current?.getBoundingClientRect();
-      if (!cr || !pr2) return;
-      setDragPos({
-        left: Math.max(0, Math.min(ev.clientX - cr.left - ox, cr.width  - pr2.width)),
-        top:  Math.max(0, Math.min(ev.clientY - cr.top  - oy, cr.height - pr2.height)),
-      });
-    }
-    function onUp() {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
-  }, [containerRef]);
-
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const panel = panelRef.current;
-    if (!panel) return;
-    const startX = e.clientX;
-    const startW = panel.getBoundingClientRect().width;
-    function onMove(ev: MouseEvent) {
-      setPanelWidth(Math.max(200, Math.min(600, startW + (ev.clientX - startX))));
-    }
-    function onUp() {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
-  }, []);
-
-  const reset = useCallback(() => { setDragPos(null); setPanelWidth(null); }, []);
-
-  return { panelRef, dragPos, panelWidth, handleDragStart, handleResizeStart, reset };
-}
-
-// ── Object overlay shell ─────────────────────────────────────────────────────
-function ObjectOverlayShell({
-  panelRef, dragPos, panelWidth, handleDragStart, handleResizeStart, reset,
-  onClose, title, accentClass, headerBg, children,
-}: {
-  panelRef: React.RefObject<HTMLDivElement | null>;
-  dragPos: { left: number; top: number } | null;
-  panelWidth: number | null;
-  handleDragStart: (e: React.MouseEvent) => void;
-  handleResizeStart: (e: React.MouseEvent) => void;
-  reset: () => void;
-  onClose: () => void;
-  title: React.ReactNode;
-  accentClass: string;
-  headerBg: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      ref={panelRef}
-      className={cn(
-        'absolute z-10 flex flex-col bg-gray-900/92 rounded-lg border overflow-hidden pointer-events-auto',
-        accentClass,
-        !dragPos    && 'top-36 left-1/2 -translate-x-1/2',
-        !panelWidth && 'w-64',
-      )}
-      style={{
-        ...(dragPos    ? { left: dragPos.left, top: dragPos.top } : {}),
-        ...(panelWidth ? { width: panelWidth }                    : {}),
-      }}
-    >
-      {/* Glowing border — mouse-following conic gradient arc */}
-      <GlowingEffect spread={30} glow={true} disabled={false} proximity={64} inactiveZone={0.01} />
-      <div
-        onMouseDown={handleDragStart}
-        className={cn(
-          'flex items-center justify-between px-3 py-1.5 border-b border-gray-700/40 shrink-0',
-          'cursor-grab active:cursor-grabbing select-none', headerBg,
-        )}
+    <main className="h-screen w-screen overflow-hidden bg-black">
+      <OrbitalHeroSection
+        planets={EXOMOON_SYSTEM}
+        compress={0.50}
+        viewRadius={narrow ? 1.8 : 2.1}
+        focus={narrow ? [0.5, 0.82] : [0.70, 0.44]}
+        scrim={narrow ? 'top' : 'left'}
+        scrimStrength={narrow ? 0.95 : 0.91}
+        trailYears={4.0}
+        yearSeconds={14}
+        planeSpread={0.65}
+        eccentricity={0.20}
+        showOrbits={true}
+        maxTurns={4}
+        glow={narrow ? 0.65 : 1.0}
+        lead={narrow ? 0.04 : 0.08}
+        starCount={1200}
       >
-        <div className="flex items-center gap-2">{title}</div>
-        <div className="flex items-center gap-1.5">
-          {(dragPos || panelWidth) && (
-            <button onMouseDown={e => e.stopPropagation()} onClick={reset}
-              className="text-gray-600 hover:text-gray-300 transition-colors text-[10px]"
-              title="Reset position and size">↩</button>
-          )}
-          <button onMouseDown={e => e.stopPropagation()} onClick={onClose}
-            className="text-gray-500 hover:text-white transition-colors">
-            <X size={14} />
-          </button>
-        </div>
-      </div>
-      <div className="relative flex-1 min-h-0 overflow-auto">
-        {/* Aurora + Spotlight background layers */}
-        <AuroraLayer opacity={0.13} />
-        <SpotlightNew />
-        {children}
-        <div onMouseDown={handleResizeStart}
-          className="absolute top-0 right-0 bottom-0 w-1 cursor-ew-resize hover:bg-white/10 transition-colors"
-          title="Drag to resize" />
-      </div>
-    </div>
-  );
-}
+        <div className={`
+          flex h-full items-start px-6 pt-16
+          sm:px-10
+          md:items-center md:pt-0
+          lg:px-20
+        `}>
+          <div className="max-w-[34rem]">
+            {/* Eyebrow */}
+            <p className="mb-4 text-[0.7rem] font-mono tracking-[0.22em] uppercase text-blue-400/60">
+              Exomoon Orbital Integrator
+            </p>
 
-// ── Three memo'd object overlays ─────────────────────────────────────────────
-const StellarOverlay = memo(function StellarOverlay({ onClose, containerRef }: ObjectOverlayBaseProps) {
-  const dr = useDraggableResizable(containerRef);
-  return (
-    <ObjectOverlayShell {...dr} onClose={onClose} accentClass="border-yellow-700/30" headerBg="bg-yellow-950/40"
-      title={<><Sun size={12} className="text-yellow-400" /><span className="text-xs text-yellow-400/80 font-medium tracking-wide uppercase">Stellar</span></>}>
-      <StellarPanel />
-    </ObjectOverlayShell>
-  );
-});
+            {/* Heading */}
+            <h1 className="text-[2.3rem] font-light leading-[1.06] tracking-[-0.03em] text-white sm:text-5xl lg:text-[4rem]">
+              A 3-Body Planetary
+              <br />
+              Orbital Dynamics Lab
+            </h1>
 
-const PlanetOverlay = memo(function PlanetOverlay({ onClose, containerRef }: ObjectOverlayBaseProps) {
-  const dr = useDraggableResizable(containerRef);
-  return (
-    <ObjectOverlayShell {...dr} onClose={onClose} accentClass="border-blue-700/30" headerBg="bg-blue-950/40"
-      title={<><Globe size={12} className="text-blue-400" /><span className="text-xs text-blue-400/80 font-medium tracking-wide uppercase">Planet</span></>}>
-      <PlanetPanel />
-    </ObjectOverlayShell>
-  );
-});
+            {/* Subtitle */}
+            <p className="mt-5 max-w-[27rem] text-[0.9rem] leading-relaxed text-white/50 md:mt-6">
+              Not every moon survives. Configure any star-planet-moon system,
+              simulate Newtonian three-body dynamics, and map stability and
+              habitability across thousands of configurations — from exact physics
+              to two-layer ML inference in seconds.
+            </p>
 
-const MoonOverlay = memo(function MoonOverlay({ onClose, containerRef }: ObjectOverlayBaseProps) {
-  const dr = useDraggableResizable(containerRef);
-  return (
-    <ObjectOverlayShell {...dr} onClose={onClose} accentClass="border-red-700/30" headerBg="bg-red-950/40"
-      title={<><Moon size={12} className="text-red-400" /><span className="text-xs text-red-400/80 font-medium tracking-wide uppercase">Moon</span></>}>
-      <MoonPanel />
-    </ObjectOverlayShell>
-  );
-});
-
-// ── EDA overlay ──────────────────────────────────────────────────────────────
-const EdaOverlay = memo(function EdaOverlay({ onClose, containerRef }: ObjectOverlayBaseProps) {
-  const [dragPos, setDragPos] = useState<{ left: number; top: number } | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const handleDragStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const panel = panelRef.current;
-    const container = containerRef.current;
-    if (!container || !panel) return;
-    const pRect = panel.getBoundingClientRect();
-    const offsetX = e.clientX - pRect.left;
-    const offsetY = e.clientY - pRect.top;
-    function onMove(ev: MouseEvent) {
-      const cr = containerRef.current?.getBoundingClientRect();
-      const pr = panelRef.current?.getBoundingClientRect();
-      if (!cr || !pr) return;
-      setDragPos({
-        left: Math.max(0, Math.min(ev.clientX - cr.left - offsetX, cr.width  - pr.width)),
-        top:  Math.max(0, Math.min(ev.clientY - cr.top  - offsetY, cr.height - pr.height)),
-      });
-    }
-    function onUp() {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-    }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
-  }, [containerRef]);
-
-  return (
-    <div ref={panelRef}
-      className={cn(
-        'absolute z-10 flex flex-col w-[min(820px,68%)] max-h-[55%]',
-        'bg-gray-900/90 rounded-lg border border-gray-700/40 overflow-hidden pointer-events-auto',
-        !dragPos && 'top-3 left-1/2 -translate-x-1/2',
-      )}
-      style={dragPos ? { left: dragPos.left, top: dragPos.top } : undefined}
-    >
-      <GlowingEffect spread={30} glow={true} disabled={false} proximity={64} inactiveZone={0.01} />
-      <div onMouseDown={handleDragStart}
-        className="flex items-center justify-between px-3 py-1.5 border-b border-gray-700/40 shrink-0
-                   cursor-grab active:cursor-grabbing select-none"
-      >
-        <div className="flex items-center gap-2">
-          <GripHorizontal size={12} className="text-gray-500" />
-          <span className="text-xs text-gray-400 font-medium tracking-wide uppercase">EDA — Exploratory Data Analysis</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {dragPos && (
-            <button onMouseDown={e => e.stopPropagation()} onClick={() => setDragPos(null)}
-              className="text-gray-600 hover:text-gray-300 transition-colors text-[10px]"
-              title="Reset to default position">↩</button>
-          )}
-          <button onMouseDown={e => e.stopPropagation()} onClick={onClose}
-            className="text-gray-500 hover:text-white transition-colors">
-            <X size={14} />
-          </button>
-        </div>
-      </div>
-      <div className="flex-1 min-h-0 overflow-auto"><EdaPanel /></div>
-    </div>
-  );
-});
-
-// ── FAB status icon ──────────────────────────────────────────────────────────
-function StatusIcon({ status, isRunning }: { status: ParamStatus; isRunning: boolean }) {
-  if (isRunning)          return <Loader2    size={10} className="animate-spin text-blue-400 shrink-0" />;
-  if (status === 'clean') return <CheckCircle size={10} className="text-green-400 shrink-0" />;
-  if (status === 'dirty') return <Zap         size={10} className="text-amber-400 shrink-0" />;
-  return null;
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-
-export default function HomePage() {
-  useJobPoller();
-
-  const [showEda,        setShowEda]        = useState(false);
-  const [showStar,       setShowStar]       = useState(false);
-  const [showPlanet,     setShowPlanet]     = useState(false);
-  const [showMoon,       setShowMoon]       = useState(false);
-  const [showMl,         setShowMl]         = useState(false);
-  const [showFullscreen, setShowFullscreen] = useState(false);
-  const [stripCollapsed, setStripCollapsed] = useState(false);
-  // Tutorial: opens on every page load; also auto-opens once after first sim completes
-  const [tutorialOpen,            setTutorialOpen]            = useState(true);
-  const [tutorialStartStep,       setTutorialStartStep]       = useState(0);
-  const [hasShownPostSimTutorial, setHasShownPostSimTutorial] = useState(false);
-  // Info modal state for canvas overlay
-  const [showCanvasInfo, setShowCanvasInfo] = useState(false);
-
-  // Status message with smooth fade-out
-  const [statusMsg,  setStatusMsg]  = useState<string | null>(null);
-  const [statusFade, setStatusFade] = useState(false);
-  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Playback panel drag + resize
-  const [playbackPos,   setPlaybackPos]   = useState<{ left: number; top: number } | null>(null);
-  const [playbackWidth, setPlaybackWidth] = useState<number | null>(null);
-  const containerRef     = useRef<HTMLDivElement>(null);
-  const playbackPanelRef = useRef<HTMLDivElement>(null);
-
-  const {
-    params, simYears, setSimYears,
-    trajectoryFrames, simMeta,
-    previewCellFrames, previewRocheFrac,
-    setJob, jobStatus,
-    dmCgs,
-    starStatus, planetStatus, moonStatus,
-  } = useSimulationStore();
-
-  const isRunning = jobStatus === 'running';
-
-  const bodyRadii: BodyRadiiAU = {
-    star:   params.rs_solar * RSUN_AU,
-    planet: bodyRadiusAU(params.mp_earth, params.dp_cgs),
-    moon:   bodyRadiusAU(params.mm_earth, dmCgs),
-  };
-
-  // HZ is computed live from the current slider params (rs_solar, Ts) so it always
-  // reflects what the sliders show — whether from a simulation, a batch cell click,
-  // or manual slider adjustment.  simMeta provides dt / t_end / rhill_AU.
-  const hzMeta = useMemo((): SimulationMeta | null => {
-    if (!simMeta) return null;
-    const rs_m = params.rs_solar * 6.957e8;
-    const L    = 4 * Math.PI * rs_m * rs_m * 5.670374419e-8 * Math.pow(params.Ts, 4);
-    return {
-      ...simMeta,
-      a_inner_au: Math.sqrt(L / (4 * Math.PI * 1.1 * 1361.0)) / 1.496e11,
-      a_outer_au: Math.sqrt(L / (4 * Math.PI * 0.5 * 1361.0)) / 1.496e11,
-    };
-  }, [params.rs_solar, params.Ts, simMeta]);
-
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  // When a chatbot cell query arrives, show those frames in the 3D canvas and mini orbit
-  // view instead of the simulation frames so the user can see the cell trajectory live.
-  const activeFrames = previewCellFrames ?? trajectoryFrames;
-  const sceneControls = useOrbitScene(canvasRef, activeFrames, hzMeta, bodyRadii);
-
-  const currentFrame = activeFrames
-    ? activeFrames[sceneControls.frameIndex] ?? null
-    : null;
-
-  // ── Esc to exit fullscreen ───────────────────────────────────────────────
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && showFullscreen) setShowFullscreen(false);
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [showFullscreen]);
-
-  // ── Status message helpers ───────────────────────────────────────────────
-  const clearStatusTimers = useCallback(() => {
-    if (statusTimerRef.current) { clearTimeout(statusTimerRef.current); statusTimerRef.current = null; }
-  }, []);
-
-  const showStatus = useCallback((text: string) => {
-    clearStatusTimers();
-    setStatusFade(false);
-    setStatusMsg(text);
-  }, [clearStatusTimers]);
-
-  const scheduleStatusFade = useCallback(() => {
-    clearStatusTimers();
-    statusTimerRef.current = setTimeout(() => {
-      setStatusFade(true);
-      statusTimerRef.current = setTimeout(() => {
-        setStatusMsg(null);
-        setStatusFade(false);
-      }, 1000);
-    }, 7000);
-  }, [clearStatusTimers]);
-
-  useEffect(() => {
-    if      (jobStatus === 'running')   showStatus('Simulation running…');
-    else if (jobStatus === 'succeeded') { showStatus('Simulation complete — scene updated'); scheduleStatusFade(); }
-    else if (jobStatus === 'failed')    { showStatus('Job failed or timed out');             scheduleStatusFade(); }
-  }, [jobStatus, showStatus, scheduleStatusFade]);
-
-  // Auto-open tutorial at the first post-sim step when a simulation first completes
-  useEffect(() => {
-    if (trajectoryFrames && !hasShownPostSimTutorial) {
-      setHasShownPostSimTutorial(true);
-      setTutorialStartStep(1); // index 1 = "3D Orbit Canvas" (first post-sim step)
-      setTutorialOpen(true);
-    }
-  }, [trajectoryFrames, hasShownPostSimTutorial]);
-
-  const handleRun = useCallback(async () => {
-    showStatus('Starting simulation…');
-    try {
-      // Read latest params/simYears from store instead of closing over stale values —
-      // callers like handleCellApplyAndRun call setParam() just before onApplyAndRun(),
-      // and Zustand updates synchronously, so getState() always has the latest values.
-      const { params: currentParams, simYears: currentSimYears } = useSimulationStore.getState();
-      const result = await agentApi.submitJob(paramsToAgentFormat(currentParams), currentSimYears);
-      if (result.ok && result.job_id) {
-        setJob(result.job_id);
-      } else {
-        showStatus('Job submission failed');
-        scheduleStatusFade();
-      }
-    } catch {
-      showStatus('Failed to reach agent service');
-      scheduleStatusFade();
-    }
-  }, [setJob, showStatus, scheduleStatusFade]);
-
-  // ── Playback drag ────────────────────────────────────────────────────────
-  const handlePlaybackDragStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const container = containerRef.current;
-    const panel = playbackPanelRef.current;
-    if (!container || !panel) return;
-    const pRect = panel.getBoundingClientRect();
-    const offsetX = e.clientX - pRect.left;
-    const offsetY = e.clientY - pRect.top;
-    function onMove(ev: MouseEvent) {
-      const cr = container!.getBoundingClientRect();
-      const pr = panel!.getBoundingClientRect();
-      setPlaybackPos({
-        left: Math.max(0, Math.min(ev.clientX - cr.left - offsetX, cr.width  - pr.width)),
-        top:  Math.max(0, Math.min(ev.clientY - cr.top  - offsetY, cr.height - pr.height)),
-      });
-    }
-    function onUp() { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
-  }, []);
-
-  // ── Playback resize ──────────────────────────────────────────────────────
-  const handlePlaybackResizeStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const panel = playbackPanelRef.current;
-    if (!panel) return;
-    const startX = e.clientX;
-    const startW = panel.getBoundingClientRect().width;
-    function onMove(ev: MouseEvent) { setPlaybackWidth(Math.max(280, Math.min(900, startW + (ev.clientX - startX)))); }
-    function onUp() { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); }
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
-  }, []);
-
-  const handleCloseEda    = useCallback(() => setShowEda(false),    []);
-  const handleCloseStar   = useCallback(() => setShowStar(false),   []);
-  const handleClosePlanet = useCallback(() => setShowPlanet(false), []);
-  const handleCloseMoon   = useCallback(() => setShowMoon(false),   []);
-  const handleCloseMl     = useCallback(() => setShowMl(false),     []);
-
-  const mainContent = (
-    <div
-      id="tutorial-canvas-area"
-      ref={containerRef}
-      className={cn(
-        'relative w-full h-full overflow-hidden',
-        showFullscreen && 'fixed inset-0 z-50 bg-gray-950',
-      )}
-    >
-      {/* Canvas — always fills full area */}
-      <OrbitCanvas
-        canvasRef={canvasRef}
-        hasFrames={!!trajectoryFrames}
-        webGLError={sceneControls.webGLError}
-        className="absolute inset-0 w-full h-full"
-      />
-
-      {/* ── Normal-mode-only UI ──────────────────────────────────────────────── */}
-      {!showFullscreen && (
-        <>
-          {/* Data readouts — top-left */}
-          <div className="absolute top-0 left-0 z-10 pointer-events-none">
-            <OrbitOverlay
-              frame={currentFrame}
-              frameIndex={sceneControls.frameIndex}
-              totalFrames={sceneControls.totalFrames}
-              meta={hzMeta}
-            />
-          </div>
-
-          {/* ── Top-center collapsible control strip ─────────────────────────── */}
-          <div id="tutorial-nasa-search" className={cn(
-            'absolute top-3 left-1/2 -translate-x-1/2 z-20 w-72',
-            'bg-black/50 border border-gray-700/40 backdrop-blur-sm rounded-lg px-3',
-            stripCollapsed ? 'py-1.5' : 'py-2',
-          )}>
-            {/* NASA search row — always visible; chevron toggle on right */}
-            <div className="flex items-center gap-1.5">
-              <div className="flex-1 min-w-0">
-                <NasaSearch hideLabel />
-              </div>
-              <button
-                onClick={() => setStripCollapsed(v => !v)}
-                className="shrink-0 text-gray-500 hover:text-gray-300 transition-colors"
-                title={stripCollapsed ? 'Expand controls' : 'Collapse controls'}
+            {/* CTA */}
+            <div className="mt-8 md:mt-10">
+              <Link
+                href="/app"
+                className="inline-flex items-center gap-2 rounded-full bg-white px-7 py-3 text-sm font-medium text-black transition-all hover:bg-white/90 hover:gap-3"
               >
-                {stripCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-              </button>
+                Get Started
+                <span aria-hidden="true">→</span>
+              </Link>
             </div>
 
-            {/* Collapsible section */}
-            {!stripCollapsed && (
-              <>
-                {/* Sim years + Run */}
-                <div className="flex items-center gap-2 mt-1.5">
-                  <span className="text-xs text-gray-500 shrink-0">Sim years</span>
-                  <input
-                    type="number"
-                    min={0} step="any"
-                    value={simYears}
-                    onChange={e => setSimYears(parseFloat(e.target.value) || 0)}
-                    disabled={isRunning}
-                    className={cn(
-                      'w-20 px-2 py-0.5 text-xs rounded bg-gray-800 border border-gray-700',
-                      'text-blue-300 font-mono focus:outline-none focus:border-blue-500',
-                      isRunning && 'opacity-40 cursor-not-allowed'
-                    )}
-                  />
-                  <MovingBorder
-                    id="tutorial-run-btn"
-                    onClick={handleRun}
-                    disabled={isRunning}
-                    containerClassName="ml-auto shrink-0"
-                    className={cn(
-                      'flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium transition-colors',
-                      'bg-blue-600 hover:bg-blue-500 text-white',
-                      isRunning && 'opacity-50 cursor-not-allowed'
-                    )}
-                  >
-                    {isRunning ? <Loader2 size={10} className="animate-spin" /> : '▶'}
-                    {isRunning ? 'Running' : 'Run'}
-                  </MovingBorder>
-                </div>
-
-                {/* Status message */}
-                {statusMsg && (
-                  <p className={cn(
-                    'text-xs text-center font-mono mt-1 transition-opacity duration-1000',
-                    jobStatus === 'succeeded' ? 'text-green-400'
-                      : jobStatus === 'failed' ? 'text-red-400'
-                      : 'text-yellow-400',
-                    statusFade && 'opacity-0',
-                  )}>
-                    {statusMsg}
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* ── Top-right: legend + FABs ──────────────────────────────────────── */}
-          <div className="absolute top-3 right-3 z-10 flex flex-col items-end gap-1.5">
-            {trajectoryFrames && (
-              <div id="tutorial-legend" className="bg-black/45 rounded px-2.5 py-2 space-y-1.5 border border-gray-700/40 relative">
-                <LegendRow color="#FFDD00" label="Star" />
-                <LegendRow color="#4488FF" label="Planet" />
-                <LegendRow color="#FF5555" label="Moon" />
-                {/* Canvas info button */}
-                <button
-                  onClick={() => setShowCanvasInfo(v => !v)}
-                  className="absolute -top-1.5 -left-6 w-5 h-5 flex items-center justify-center rounded-full text-gray-500 hover:text-blue-400 hover:bg-blue-900/20 transition-colors text-[11px] border border-gray-700/50 bg-gray-900/70"
-                  title="About this view"
+            {/* Feature chips */}
+            <div className="mt-8 flex flex-wrap gap-2 md:mt-9">
+              {[
+                'Numba-compiled leapfrog',
+                'Habitable zone mapping',
+                'Two-layer ML predictor',
+                'NASA archive search',
+              ].map(f => (
+                <span
+                  key={f}
+                  className="rounded-full border border-white/10 px-3 py-0.5 text-[0.7rem] text-white/35 tracking-wide"
                 >
-                  <Info size={10} />
-                </button>
-              </div>
-            )}
-            {/* Canvas info modal */}
-            {showCanvasInfo && (
-              <>
-                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" onClick={() => setShowCanvasInfo(false)} />
-                <div className="fixed z-50 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 bg-gray-900 border border-gray-700/60 rounded-xl shadow-2xl p-5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-white">3D Orbit View</span>
-                    <button onClick={() => setShowCanvasInfo(false)} className="text-gray-500 hover:text-white text-base leading-none">✕</button>
-                  </div>
-                  <div className="space-y-2 text-xs text-gray-400 leading-relaxed">
-                    <p><span className="text-yellow-400 font-medium">Yellow</span> = Star · <span className="text-blue-400 font-medium">Blue</span> = Planet · <span className="text-red-400 font-medium">Red</span> = Moon</p>
-                    <p>The <span className="text-emerald-400 font-medium">green shell</span> marks the star&apos;s habitable zone (HZ) — the range of orbital distances where liquid water could exist on a moon&apos;s surface.</p>
-                    <p>After running an ML prediction, a <span className="text-violet-400 font-medium">violet shell</span> shows the predicted stable+habitable orbit range for the selected moon mass.</p>
-                    <p>Drag to rotate · Scroll to zoom · Use ⊙ in the playback bar to reset the camera.</p>
-                  </div>
-                </div>
-              </>
-            )}
-            <button id="tutorial-star-fab" onClick={() => setShowStar(v => !v)}
-              className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
-                showStar ? 'bg-yellow-600/30 text-yellow-300 border-yellow-600/50'
-                         : 'bg-black/50 text-gray-400 hover:text-yellow-300 hover:bg-gray-800/70 border-gray-700/60')}
-              title="Toggle stellar parameters">
-              <Sun size={12} className="text-yellow-400 shrink-0" />
-              <span>Star</span>
-              <StatusIcon status={starStatus} isRunning={isRunning} />
-            </button>
-            <button id="tutorial-planet-fab" onClick={() => setShowPlanet(v => !v)}
-              className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
-                showPlanet ? 'bg-blue-600/30 text-blue-300 border-blue-600/50'
-                           : 'bg-black/50 text-gray-400 hover:text-blue-300 hover:bg-gray-800/70 border-gray-700/60')}
-              title="Toggle planet parameters">
-              <Globe size={12} className="text-blue-400 shrink-0" />
-              <span>Planet</span>
-              <StatusIcon status={planetStatus} isRunning={isRunning} />
-            </button>
-            <button id="tutorial-moon-fab" onClick={() => setShowMoon(v => !v)}
-              className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
-                showMoon ? 'bg-red-600/30 text-red-300 border-red-600/50'
-                         : 'bg-black/50 text-gray-400 hover:text-red-300 hover:bg-gray-800/70 border-gray-700/60')}
-              title="Toggle moon parameters">
-              <Moon size={12} className="text-red-400 shrink-0" />
-              <span>Moon</span>
-              <StatusIcon status={moonStatus} isRunning={isRunning} />
-            </button>
-            <button id="tutorial-eda-fab" onClick={() => setShowEda(v => !v)}
-              className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
-                showEda ? 'bg-blue-600/80 text-white border-blue-500/60'
-                        : 'bg-black/50 text-gray-400 hover:text-white hover:bg-gray-800/70 border-gray-700/60')}
-              title="Toggle EDA panel">
-              <BarChart2 size={12} />
-              EDA
-            </button>
-            <button id="tutorial-ml-fab" onClick={() => setShowMl(v => !v)}
-              className={cn('flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors',
-                showMl ? 'bg-violet-600/80 text-white border-violet-500/60'
-                       : 'bg-black/50 text-gray-400 hover:text-violet-300 hover:bg-gray-800/70 border-gray-700/60')}
-              title="Toggle ML Stability Predictor">
-              <Brain size={12} className={showMl ? 'text-white' : 'text-violet-400'} />
-              ML
-            </button>
-          </div>
-
-          {/* Object parameter overlays — AnimatePresence for entry/exit */}
-          <AnimatePresence>
-            {showStar && (
-              <motion.div key="star-overlay"
-                initial={{ opacity: 0, scale: 0.95, y: -6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: -6 }}
-                transition={{ duration: 0.14 }}
-                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-              >
-                <StellarOverlay onClose={handleCloseStar} containerRef={containerRef} />
-              </motion.div>
-            )}
-            {showPlanet && (
-              <motion.div key="planet-overlay"
-                initial={{ opacity: 0, scale: 0.95, y: -6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: -6 }}
-                transition={{ duration: 0.14 }}
-                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-              >
-                <PlanetOverlay onClose={handleClosePlanet} containerRef={containerRef} />
-              </motion.div>
-            )}
-            {showMoon && (
-              <motion.div key="moon-overlay"
-                initial={{ opacity: 0, scale: 0.95, y: -6 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: -6 }}
-                transition={{ duration: 0.14 }}
-                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-              >
-                <MoonOverlay onClose={handleCloseMoon} containerRef={containerRef} />
-              </motion.div>
-            )}
-            {showEda && (
-              <motion.div key="eda-overlay"
-                initial={{ opacity: 0, scale: 0.97, y: -4 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.97, y: -4 }}
-                transition={{ duration: 0.14 }}
-                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-              >
-                <EdaOverlay onClose={handleCloseEda} containerRef={containerRef} />
-              </motion.div>
-            )}
-            {showMl && (
-              <motion.div key="ml-overlay"
-                initial={{ opacity: 0, scale: 0.97, y: -4 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.97, y: -4 }}
-                transition={{ duration: 0.14 }}
-                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
-              >
-                <MlMapOverlay
-                  onClose={handleCloseMl}
-                  containerRef={containerRef}
-                  onApplyAndRun={handleRun}
-                  frameIndex={sceneControls.frameIndex}
-                />
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Fullscreen enter button — bottom-left */}
-          <button
-            onClick={() => setShowFullscreen(true)}
-            className="absolute bottom-3 left-3 z-20 flex items-center gap-1.5 px-2 py-1.5
-                       rounded text-xs text-gray-500 hover:text-white border border-gray-700/50
-                       bg-black/40 hover:bg-gray-800/70 transition-colors"
-            title="Enter fullscreen (Esc to exit)"
-          >
-            <Maximize2 size={12} />
-          </button>
-        </>
-      )}
-
-      {/* ── Fullscreen-mode-only UI ──────────────────────────────────────────── */}
-      {showFullscreen && (
-        <>
-          {/* Stability + habitability badges — top-left */}
-          {currentFrame && hzMeta && (
-            <FullscreenBadges frame={currentFrame} meta={hzMeta} />
-          )}
-
-          {/* Exit button — top-right */}
-          <button
-            onClick={() => setShowFullscreen(false)}
-            className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1.5
-                       rounded text-xs text-gray-400 hover:text-white border border-gray-700/50
-                       bg-black/50 hover:bg-gray-800/70 transition-colors"
-            title="Exit fullscreen"
-          >
-            <X size={12} />
-            <span>Exit</span>
-            <span className="text-gray-600 text-[10px]">Esc</span>
-          </button>
-        </>
-      )}
-
-      {/* ── Always-visible: focus target toggle + MiniOrbitView + playback ─── */}
-      {/* Row 1 — Orbit: smooth-follow lerp around body                         */}
-      {/* Row 2 — Lock: hard-snap each frame; scroll in for first-person view   */}
-      {sceneControls.totalFrames > 0 && (() => {
-        const ORBIT_BTNS: { key: FocusTarget; icon: string; title: string; color: string }[] = [
-          { key: 'barycenter', icon: '☀', title: 'Orbit: star (default)', color: 'yellow' },
-          { key: 'planet',     icon: '⬤', title: 'Orbit: planet',         color: 'blue'   },
-          { key: 'moon',       icon: '◦', title: 'Orbit: moon',           color: 'red'    },
-        ];
-        const LOCK_BTNS: { key: FocusTarget; icon: string; title: string; color: string }[] = [
-          { key: 'fp-star',   icon: '⊙', title: 'Lock to star — scroll in for first-person',   color: 'yellow' },
-          { key: 'fp-planet', icon: '⊕', title: 'Lock to planet — scroll in for first-person', color: 'blue'   },
-          { key: 'fp-moon',   icon: '⊗', title: 'Lock to moon — scroll in for first-person',   color: 'red'    },
-        ];
-        const btnCls = (active: boolean, color: string) => cn(
-          'w-7 h-7 flex items-center justify-center rounded text-sm border transition-colors bg-black/50 border-gray-700/50',
-          active
-            ? color === 'yellow' ? 'bg-yellow-900/60 text-yellow-300 border-yellow-600/60'
-            : color === 'blue'   ? 'bg-blue-900/60 text-blue-300 border-blue-600/60'
-            :                      'bg-red-900/60 text-red-300 border-red-600/60'
-            : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800/60',
-        );
-        return (
-          <div id="tutorial-view-buttons" className="absolute bottom-14 left-3 z-20 flex flex-col gap-1">
-            <div className="flex gap-1">
-              {ORBIT_BTNS.map(({ key, icon, title, color }) => (
-                <button key={key} onClick={() => sceneControls.setFocusTarget(key)}
-                  title={title} className={btnCls(sceneControls.focusTarget === key, color)}>
-                  {icon}
-                </button>
+                  {f}
+                </span>
               ))}
-            </div>
-            <div className="flex gap-1">
-              {LOCK_BTNS.map(({ key, icon, title, color }) => (
-                <button key={key} onClick={() => sceneControls.setFocusTarget(key)}
-                  title={title} className={btnCls(sceneControls.focusTarget === key, color)}>
-                  {icon}
-                </button>
-              ))}
-            </div>
-          </div>
-        );
-      })()}
-
-      <MiniOrbitView
-        id="tutorial-mini-orbit"
-        frames={activeFrames}
-        frameIndex={sceneControls.frameIndex}
-        showHillSphereRings={!!previewCellFrames}
-        rocheInnerFrac={previewRocheFrac ?? undefined}
-      />
-
-      {sceneControls.totalFrames > 0 && (
-        <div
-          id="tutorial-playback"
-          ref={playbackPanelRef}
-          className={cn(
-            'absolute z-20',
-            !playbackPos   && 'bottom-3 left-1/2 -translate-x-1/2',
-            !playbackWidth && 'w-[min(580px,78%)]',
-          )}
-          style={{
-            ...(playbackPos   ? { left: playbackPos.left, top: playbackPos.top } : {}),
-            ...(playbackWidth ? { width: playbackWidth }                          : {}),
-          }}
-        >
-          <div
-            onMouseDown={handlePlaybackDragStart}
-            className="relative flex items-center justify-center w-full py-0.5
-                       cursor-grab active:cursor-grabbing select-none
-                       rounded-t bg-gray-800/60 border border-b-0 border-gray-700/50"
-            title="Drag to reposition"
-          >
-            <GripHorizontal size={12} className="text-gray-500" />
-            {(playbackPos || playbackWidth) && (
-              <button
-                onMouseDown={e => e.stopPropagation()}
-                onClick={() => { setPlaybackPos(null); setPlaybackWidth(null); }}
-                className="absolute right-2 text-gray-600 hover:text-gray-300 transition-colors text-[10px]"
-                title="Reset position and size"
-              >↩</button>
-            )}
-          </div>
-          <div className="relative">
-            <AnimationControls {...sceneControls} className="rounded-t-none" />
-            <div
-              onMouseDown={handlePlaybackResizeStart}
-              className="absolute bottom-0 right-0 w-4 h-4 cursor-ew-resize flex items-end justify-end p-0.5"
-              title="Drag to resize"
-            >
-              <svg width="8" height="8" viewBox="0 0 8 8" className="opacity-40">
-                <polygon points="0,8 8,0 8,8" fill="#9ca3af" />
-              </svg>
             </div>
           </div>
         </div>
-      )}
-    </div>
-  );
-
-  return (
-    <>
-      <AppShell
-        main={mainContent}
-        chat={<ChatPanel />}
-      />
-
-      {/* Tutorial FAB — ? button above chatbot FAB */}
-      <button
-        onClick={() => { setTutorialStartStep(0); setTutorialOpen(true); }}
-        className="fixed bottom-[296px] right-4 z-50 w-12 h-12 rounded-full shadow-lg
-                   flex items-center justify-center transition-colors
-                   bg-gray-800 hover:bg-gray-700 border border-gray-600/50"
-        title="Open tutorial"
-      >
-        <HelpCircle size={20} className="text-gray-300" />
-      </button>
-
-      {/* Tutorial overlay — auto-opens on every load; re-opens after first sim completes */}
-      {tutorialOpen && (
-        <TutorialOverlay
-          onClose={() => setTutorialOpen(false)}
-          simReady={!!trajectoryFrames}
-          startStep={tutorialStartStep}
-        />
-      )}
-    </>
-  );
-}
-
-function LegendRow({ color, label }: { color: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2 text-xs">
-      <span className="inline-block w-5 h-0.5 rounded-full shrink-0" style={{ backgroundColor: color }} />
-      <span className="text-gray-400">{label}</span>
-    </div>
+      </OrbitalHeroSection>
+    </main>
   );
 }
