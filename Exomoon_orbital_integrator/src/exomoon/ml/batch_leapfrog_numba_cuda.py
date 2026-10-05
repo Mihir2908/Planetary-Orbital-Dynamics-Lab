@@ -351,8 +351,10 @@ def batch_leapfrog_numba_trajectories(
     T_moon_ref = 2.0 * np.pi * np.sqrt(am_ref_AU**3 / (mu_mp + mu_mm_ref))
     if n_orbits is not None:
         t_sim = float(n_orbits) * T_moon_ref
-    dt_fixed = min(T_moon_ref / 100.0, 1.0 / 20_000.0)
-    n_phys   = max(int(np.ceil(t_sim / dt_fixed)), n_steps)
+    v_planet_circ = float(np.sqrt(ms_gp_tmp / ap_AU))   # circular speed AU/yr (G=4π²)
+    dt_rhill      = 0.05 * rhill_AU / v_planet_circ      # planet moves ≤2.5% rhill per half-step
+    dt_fixed      = min(T_moon_ref / 100.0, 1.0 / 20_000.0, dt_rhill)
+    n_phys        = max(int(np.ceil(t_sim / dt_fixed)), n_steps)
 
     # stride: store one frame every `stride` physics steps → exactly n_steps frames
     stride = max(n_phys // n_steps, 1)
