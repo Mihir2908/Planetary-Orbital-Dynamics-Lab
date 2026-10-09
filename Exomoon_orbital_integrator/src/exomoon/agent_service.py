@@ -175,9 +175,9 @@ s3 = boto3.client("s3", region_name=AWS_REGION) if AWS_ENABLED and BUCKET else N
 sf = boto3.client("stepfunctions", region_name=AWS_REGION) if AWS_ENABLED and STATE_MACHINE_ARN else None
 
 # ── GPU trajectory-preview service (EC2 g4dn.xlarge, hnn_gpu_service.py) ──────
-GPU_SERVICE_URL       = os.getenv("GPU_SERVICE_URL", "http://13.134.42.127:8001")
+GPU_SERVICE_URL       = os.getenv("GPU_SERVICE_URL", "http://localhost:8001")
 GPU_SERVICE_TIMEOUT_S = int(os.getenv("GPU_SERVICE_TIMEOUT_S", "2400"))
-GPU_INSTANCE_ID       = os.getenv("GPU_INSTANCE_ID", "i-0be2b62719a4cdde2")
+GPU_INSTANCE_ID       = os.getenv("GPU_INSTANCE_ID", "")
 
 _ec2 = boto3.client("ec2", region_name=AWS_REGION) if AWS_ENABLED else None
 _gpu_start_lock = threading.Lock()
@@ -2125,14 +2125,16 @@ def _chat_with_claude(req: ChatRequest) -> Dict[str, Any]:
         print("[AGENT] Claude not enabled, using rule-based fallback.", flush=True)
         return _chat_rule_based(req, session=session, session_key=session_key)
 
-    # Developer mode keyword detection — 'mihirrb2908' activates, 'mihirrb2908exit' deactivates.
+    # Developer mode keyword detection — set DEVELOPER_KEY env var to enable.
+    # Sending the key activates developer mode; key + 'exit' deactivates.
     # Logged to agent service logs only; never surfaced in chatbot responses.
+    _dev_key = os.getenv("DEVELOPER_KEY", "")
     global _developer_mode
     msg_lower = req.message
-    if 'mihirrb2908exit' in msg_lower:
+    if _dev_key and (_dev_key + 'exit') in msg_lower:
         _developer_mode = False
         print("[AGENT] Developer mode DEACTIVATED — switching to user mode", flush=True)
-    elif 'mihirrb2908' in msg_lower:
+    elif _dev_key and _dev_key in msg_lower:
         _developer_mode = True
         print("[AGENT] Developer mode ACTIVATED", flush=True)
 

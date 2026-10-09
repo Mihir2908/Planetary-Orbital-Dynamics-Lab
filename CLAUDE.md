@@ -908,12 +908,12 @@ HNN and GT Numba batch inference runs on a dedicated EC2 g4dn.xlarge instance (N
 - ECR repo: `exomoon-hnn-gpu`
 - Security group: `exomoon-hnn-gpu-sg` (port 8001 open, port 22 restricted to developer IP)
 - IAM instance profile: `ec2-ecr-access-role` (AmazonEC2ContainerRegistryReadOnly)
-- Key pair: `exomoon-hnn-gpu-key` at `C:\Users\mihir\.aws\exomoon-hnn-gpu-key.pem`
+- Key pair: `exomoon-hnn-gpu-key` at `<LOCAL-AWS-KEY-PATH>` (see `ec2_gpu_setup_state` memory)
 
-**Current GPU IP**: `52.56.252.104` (spot — check `GPU_SERVICE_URL` env or `agent_service.py` line ~126 for the live IP; memory file `ec2_gpu_setup_state.md` may have a stale IP from original launch).
+**Current GPU IP**: set via `GPU_SERVICE_URL` env var on the ECS task definition — check `ec2_gpu_setup_state` memory for the current Elastic IP.
 
 **Agent service connection** (`agent_service.py`):
-- `GPU_SERVICE_URL` — env var with default `http://16.60.135.10:8001` (update to current spot IP)
+- `GPU_SERVICE_URL` — env var (set in ECS task definition; defaults to localhost if unset)
 - `GPU_SERVICE_TIMEOUT_S = 1200` — 20 min timeout (covers HNN 470s + transfer + margin)
 - `_forward_to_gpu(req)` — forwards `POST /trajectory/preview` requests to the EC2 service with n_steps=5000
 
