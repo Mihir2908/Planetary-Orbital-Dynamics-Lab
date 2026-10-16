@@ -43,6 +43,7 @@ export interface SceneControls {
   setIsPlaying: (v: boolean) => void;
   setSpeedMultiplier: (v: number) => void;
   resetCamera: () => void;
+  resetToSystemView: () => void;
   setFocusTarget: (t: FocusTarget) => void;
 }
 
@@ -107,6 +108,9 @@ export function useOrbitScene(
 
   // ML stability annulus (purple shell between predicted am_min and am_max)
   const mlShellRef = useRef<THREE.Mesh | null>(null);
+
+  // System-only camera position — set on each new simulation, used by resetToSystemView.
+  const sysCamPosRef = useRef<THREE.Vector3 | null>(null);
 
   const setFrameIndex      = useCallback((i: number) => { frameIndexRef.current = i; setFrameIndexState(i); }, []);
   const setIsPlaying       = useCallback((v: boolean) => { isPlayingRef.current = v; setIsPlayingState(v); }, []);
@@ -538,6 +542,11 @@ export function useOrbitScene(
       controlsRef.current.target.set(0, 0, 0);
       controlsRef.current.update();
       controlsRef.current.saveState(); // reset() will return here, not to construction-time (0,3,6)
+
+      // System-only fit: based purely on a_outer_au, ignoring moon escape distance.
+      // Used by "Zoom to system" so the star, planet and HZ always stay visible.
+      const sysExtent = a_outer_au * 1.5;
+      sysCamPosRef.current = new THREE.Vector3(0, sysExtent * 0.6, sysExtent * 1.2);
     }
 
   }, [frames, meta]);
@@ -679,6 +688,16 @@ export function useOrbitScene(
     setIsPlaying,
     setSpeedMultiplier,
     resetCamera: () => { controlsRef.current?.reset(); },
+    resetToSystemView: () => {
+      const cam = cameraRef.current;
+      const ctrl = controlsRef.current;
+      const pos = sysCamPosRef.current;
+      if (cam && ctrl && pos) {
+        cam.position.copy(pos);
+        ctrl.target.set(0, 0, 0);
+        ctrl.update();
+      }
+    },
     setFocusTarget,
   };
 }

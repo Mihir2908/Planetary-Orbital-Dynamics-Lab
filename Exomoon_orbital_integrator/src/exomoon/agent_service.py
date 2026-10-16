@@ -824,6 +824,7 @@ def _tool_specs() -> list[dict]:
                     "mm_resolution": {"type": "integer", "description": "Moon mass grid points — 30 or 50 (default 30)"},
                     "am_resolution": {"type": "integer", "description": "Moon orbit grid points — 30 or 50 (default 30)"},
                     "t_sim": {"type": "number", "description": "Simulation duration in years (default 10)"},
+                    "moon_retrograde": {"type": "boolean", "description": "Override orbit direction: true = retrograde, false = prograde. If omitted, inherits from the current Moon panel setting."},
                     "system_params": {
                         "type": "object",
                         "description": (
@@ -1380,7 +1381,8 @@ def _execute_tool(tool_name: str, tool_input: Dict[str, Any], req: ChatRequest, 
                 mm_res     = int(tool_input.get("mm_resolution", 30))
                 am_res     = int(tool_input.get("am_resolution", 30))
                 t_sim      = float(tool_input.get("t_sim",       req.years or 10.0))
-                moon_retro = bool(raw_params.get("moon_retrograde", False))
+                _retro_override = tool_input.get("moon_retrograde")
+                moon_retro = bool(_retro_override) if _retro_override is not None else bool(raw_params.get("moon_retrograde", False))
                 em         = float(raw_params.get("em",          0.0))
 
                 traj_req = TrajectoryPreviewRequest(
